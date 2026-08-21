@@ -2,7 +2,7 @@
 
 # 🚀 سامانه BAS (ارکستراتور بومی Node.js)
 
-[![GitHub Repo](https://img.shields.io/badge/GitHub-Repository-181717?style=flat-square&logo=github)](https://github.com/mohammadnjt/app_management)
+[![GitHub Repo](https://img.shields.io/badge/GitHub-Repository-181717?style=flat-square&logo=github)](https://github.com/mohammadnjt/bas)
 
 <!-- عکس پیش‌نمایش داشبورد -->
 <div align="center">
@@ -61,8 +61,8 @@
 ### ۱. دریافت و نصب
 ابتدا پروژه را کلون کرده و وابستگی‌ها را نصب کنید:
 ```bash
-git clone https://github.com/mohammadnjt/app_management.git
-cd app_management
+git clone https://github.com/mohammadnjt/bas.git
+cd bas
 npm install
 ```
 
@@ -71,7 +71,7 @@ npm install
 
 ```env
 # کلید امنیتی اختصاصی شما برای ورود به پنل
-API_KEY=your_super_secret_key
+ADMIN_API_KEY=your_super_secret_key
 
 # (اختیاری) توکن هوش مصنوعی گوگل برای سیستم عیب‌یاب
 GEMINI_API_KEY=your_gemini_api_key
@@ -129,11 +129,11 @@ npm run start
 
 ## 🛡️ مسیر ورود به پنل
 
-برای ورود به داشبورد، از آنجایی که صفحه لاگین مرسوم به دلایل امنیتی حذف شده است، باید مسیر ورود را همراه با `API_KEY` در مرورگر باز کنید:
+برای ورود به داشبورد، از آنجایی که صفحه لاگین مرسوم به دلایل امنیتی حذف شده است، باید مسیر ورود را همراه با `ADMIN_API_KEY` در مرورگر باز کنید:
 
 ```text
-http://your-server-ip:3000/<API_KEY>
+http://your-server-ip:3000/<ADMIN_API_KEY>
 ```
-*مثال:* اگر `API_KEY=mySecret123` باشد، آدرس ورود `http://domain.com:3000/mySecret123` خواهد بود. پس از یکبار ورود موفق، کوکی دسترسی برای یک‌سال روی سیستم شما ست می‌شود. در صورت دسترسی غیرمجاز سایر افراد، مستقیماً به آدرس پایه (وب‌سایت اصلی) ریدایرکت می‌شوند.
+*مثال:* اگر `ADMIN_API_KEY=mySecret123` باشد، آدرس ورود `http://domain.com:3000/mySecret123` خواهد بود. پس از یکبار ورود موفق، کوکی دسترسی برای یک‌سال روی سیستم شما ست می‌شود. در صورت دسترسی غیرمجاز سایر افراد، مستقیماً به آدرس ریدایرکت (`UNAUTHORIZED_REDIRECT_URL`) یا وب‌سایت اصلی منتقل می‌شوند.
 
 </div>
