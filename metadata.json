@@ -1,0 +1,6 @@
+{
+  "name": "blh auto server(BAS)",
+  "description": "A powerful full-stack Node.js process manager, orchestrator, and real-time monitoring dashboard featuring automated dependency merging, auto-restart, SMS crash alerts, batch git updates, and Gemini-powered log troubleshooting.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

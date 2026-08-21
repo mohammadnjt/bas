@@ -1,0 +1,703 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>مستندات سیستم ارکستراتور هوشمند BAS (BAS Orchestrator Docs)</title>
+    <!-- Tailwind CSS Play CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            colors: {
+              slate: {
+                950: "#060a16",
+                900: "#0c1224",
+                850: "#10172a",
+                800: "#1e293b",
+                750: "#1e293b",
+              },
+            },
+            fontFamily: {
+              sans: ["Vazirmatn", "Inter", "sans-serif"],
+              mono: ["JetBrains Mono", "monospace"],
+            },
+          },
+        },
+      };
+    </script>
+    <!-- Fonts from Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&family=Vazirmatn:wght@300;400;500;700;800;900&display=swap"
+      rel="stylesheet"
+    />
+    <!-- Lucide Icons CDN -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+      body {
+        font-family: "Vazirmatn", "Inter", sans-serif;
+        background-color: #0A0A0B;
+        background-image: url('/bgbas.png');
+        background-size: cover;
+        background-attachment: fixed;
+        background-position: center;
+        color: #c0caf5;
+      }
+      
+      .bento-card {
+        background-color: rgba(5, 11, 20, 0.6);
+        backdrop-filter: blur(40px);
+        -webkit-backdrop-filter: blur(40px);
+        border: 1px solid rgba(130, 170, 255, 0.3);
+        border-radius: 1rem;
+        box-shadow: 0 0 30px rgba(130, 170, 255, 0.05);
+        transition: all 0.3s ease-in-out;
+        position: relative;
+        overflow: hidden;
+      }
+      .bento-card::before {
+        content: '';
+        position: absolute;
+        inset: 0;
+        background: linear-gradient(to bottom right, rgba(130, 170, 255, 0.05), transparent);
+        pointer-events: none;
+      }
+      .bento-card:hover {
+        border-color: rgba(130, 170, 255, 0.6);
+        box-shadow: 0 0 40px rgba(130, 170, 255, 0.15);
+      }
+      .bento-card > * {
+        position: relative;
+        z-index: 10;
+      }
+      pre,
+      code {
+        font-family: "JetBrains Mono", monospace;
+      }
+      ::-webkit-scrollbar {
+        width: 8px;
+        height: 8px;
+      }
+      ::-webkit-scrollbar-track {
+        background: transparent;
+      }
+      ::-webkit-scrollbar-thumb {
+        background: rgba(130, 170, 255, 0.2);
+        border-radius: 4px;
+      }
+      ::-webkit-scrollbar-thumb:hover {
+        background: rgba(130, 170, 255, 0.4);
+      }
+      
+      /* Overriding internal tailwind inline colors to match new theme */
+      .bg-zinc-900\/50 {
+         background-color: rgba(10, 16, 29, 0.5) !important;
+      }
+      .border-zinc-800\/50, .border-zinc-800, .border-zinc-800\/60 {
+         border-color: rgba(130, 170, 255, 0.2) !important;
+      }
+      .bg-black\/80, .bg-black {
+         background-color: rgba(30, 32, 48, 0.7) !important;
+      }
+      .text-slate-300, .text-slate-400 {
+         color: rgba(192, 202, 245, 0.8) !important;
+      }
+      .text-slate-200 {
+         color: #c0caf5 !important;
+      }
+      .text-white {
+         color: #82aaff !important;
+      }
+      .text-emerald-400 {
+         color: #34d399 !important;
+      }
+      .text-blue-400 {
+         color: #38bdf8 !important;
+      }
+      .text-purple-400 {
+         color: #c084fc !important;
+      }
+      .text-amber-400 {
+         color: #fbbf24 !important;
+      }
+      /* Removing standard header gradient border since we have pseudo element */
+      header.bento-card {
+         border-color: rgba(52, 211, 153, 0.4) !important;
+      }
+      header.bento-card::before {
+         background: linear-gradient(to bottom right, rgba(52, 211, 153, 0.05), transparent);
+      }
+      header.bento-card h1 {
+         color: #34d399 !important;
+      }
+    </style>
+  </head>
+  <body class="selection:bg-emerald-500 selection:text-black">
+    <div class="min-h-screen py-10 px-4 sm:px-6 lg:px-8 max-w-6xl mx-auto">
+      <!-- Header Banner -->
+      <header
+        class="mb-12 text-center relative overflow-hidden bento-card p-8 border border-emerald-900/30 shadow-[inset_0_0_30px_rgba(16,185,129,0.03)]"
+      >
+        <div
+          class="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-emerald-500 via-teal-500 to-blue-500"
+        ></div>
+        <div class="flex items-center justify-center gap-3 mb-4">
+          <div
+            class="p-3 bg-emerald-950/50 border border-emerald-800/50 rounded-xl text-emerald-400"
+          >
+            <i data-lucide="cpu" class="w-8 h-8"></i>
+          </div>
+          <h1
+            class="text-2xl sm:text-3xl font-extrabold text-white tracking-tight"
+          >
+            راهنمای ارکستراتور فرآیند هوشمند BAS
+          </h1>
+        </div>
+        <p class="text-sm text-slate-400 max-w-2xl mx-auto leading-relaxed">
+          مستندات مرجع، معماری سیستم کشف خودکار، و نحوه مدیریت پروژه‌ها در پنل
+          مدیریت اختصاصی <span class="text-emerald-400 font-bold">BAS SRE</span>
+        </p>
+        <div class="flex items-center justify-center gap-2 mt-6">
+          <span
+            class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
+          >
+            <span
+              class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"
+            ></span>
+            فعال و آنلاین
+          </span>
+          <span
+            class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-slate-800 text-slate-400 border border-slate-700"
+          >
+            نسخه 2.1.0-SRE
+          </span>
+        </div>
+      </header>
+
+      <!-- Main Bento Grid -->
+      <main class="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <!-- Card 1: What is it? -->
+        <section class="bento-card p-6 md:col-span-2 space-y-4">
+          <div
+            class="flex items-center gap-2.5 text-emerald-400 pb-2 border-b border-zinc-800/60"
+          >
+            <i data-lucide="info" class="w-5 h-5"></i>
+            <h2 class="font-bold text-base text-white">ارکستراتور BAS چیست؟</h2>
+          </div>
+          <p class="text-sm text-slate-300 leading-relaxed text-justify">
+            <strong>ارکستراتور BAS (BAS Orchestrator)</strong> یک بستر مدیریت
+            فرآیند پروسس‌های بومی (Native Application Process Manager) بسیار سبک
+            و هوشمند است که با الهام از ابزارهایی مانند PM2، Kubernetes و
+            بسترهای SRE مدرن طراحی شده است. این ابزار به صورت اختصاصی برای
+            مانیتورینگ لایو، کشف خودکار، عیب‌یابی مجهز به هوش مصنوعی و خودترمیمی
+            سرویس‌های بک‌اند و فرانت‌اند طراحی شده است.
+          </p>
+          <p class="text-sm text-slate-400 leading-relaxed text-justify">
+            این بستر اجازه می‌دهد ده‌ها پروژه بک‌اند (مبتنی بر Node.js, Python,
+            Golang یا هر فرآیند قابل اجرا) و پروژه‌های فرانت‌اند (ایستاتیک با
+            وب‌سرور داخلی اختصاصی) را زیر یک چتر یکپارچه اجرا، مدیریت و نظارت
+            کنید، بدون اینکه نیاز به کانفیگ‌های سنگین داکر یا ابزارهای پیچیده
+            ارکستراسیون داشته باشید.
+          </p>
+        </section>
+
+        <!-- Card 2: Core Metrics & Technologies -->
+        <section class="bento-card p-6 space-y-4">
+          <div
+            class="flex items-center gap-2.5 text-blue-400 pb-2 border-b border-zinc-800/60"
+          >
+            <i data-lucide="layers" class="w-5 h-5"></i>
+            <h2 class="font-bold text-base text-white">تکنولوژی‌های هسته</h2>
+          </div>
+          <ul class="space-y-3 text-xs text-slate-400">
+            <li class="flex items-start gap-2">
+              <i
+                data-lucide="terminal"
+                class="w-4 h-4 text-emerald-400 mt-0.5 shrink-0"
+              ></i>
+              <span
+                ><strong>هسته لینوکس بومی:</strong> استفاده مستقیم از متدهای OS
+                Process Spawn و ارزیابی مستقیم مصرف منابع پروسس‌ها در سیستم
+                عامل.</span
+              >
+            </li>
+            <li class="flex items-start gap-2">
+              <i
+                data-lucide="sparkles"
+                class="w-4 h-4 text-emerald-400 mt-0.5 shrink-0"
+              ></i>
+              <span
+                ><strong>هوش مصنوعی Gemini Pro:</strong> تحلیل لایو و هوشمند
+                لاگ‌های خطا با مادل پیشرفته استنتاجی گوگل.</span
+              >
+            </li>
+            <li class="flex items-start gap-2">
+              <i
+                data-lucide="smartphone"
+                class="w-4 h-4 text-emerald-400 mt-0.5 shrink-0"
+              ></i>
+              <span
+                ><strong>درگاه Kavenegar API:</strong> سیستم اطلاع‌رسانی آنی SMS
+                در هنگام رخداد کرش‌های مکرر سرویس‌ها.</span
+              >
+            </li>
+          </ul>
+        </section>
+
+        <!-- Card 3: Key Benefits (Bento Box Full Width) -->
+        <section class="bento-card p-6 md:col-span-3 space-y-6">
+          <div
+            class="flex items-center gap-2.5 text-emerald-400 pb-2 border-b border-zinc-800/60"
+          >
+            <i data-lucide="award" class="w-5 h-5"></i>
+            <h2 class="font-bold text-base text-white">
+              فواید و مزایای برجسته سیستم BAS
+            </h2>
+          </div>
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <div
+              class="bg-zinc-900/50 p-4 rounded-lg border border-zinc-800/50 space-y-2"
+            >
+              <div class="flex items-center gap-2 text-emerald-400">
+                <i data-lucide="zap" class="w-4 h-4"></i>
+                <h3 class="font-bold text-xs uppercase tracking-wide">
+                  کشف خودکار هوشمند
+                </h3>
+              </div>
+              <p class="text-xs text-slate-400 leading-relaxed">
+                نیازی به رجیستر کردن دستی پروژه‌ها در دیتابیس نیست. سیستم به طور
+                مستمر پوشه
+                <code class="text-slate-300 font-mono">apps/</code> را مانیتور
+                کرده و با ساخت پوشه جدید، آن را بلافاصله شناسایی، کانفیگ و
+                بارگذاری می‌کند.
+              </p>
+            </div>
+
+            <div
+              class="bg-zinc-900/50 p-4 rounded-lg border border-zinc-800/50 space-y-2"
+            >
+              <div class="flex items-center gap-2 text-blue-400">
+                <i data-lucide="activity" class="w-4 h-4"></i>
+                <h3 class="font-bold text-xs uppercase tracking-wide">
+                  خود-ترمیمی اتوماتیک
+                </h3>
+              </div>
+              <p class="text-xs text-slate-400 leading-relaxed">
+                در صورتی که هر کدام از اپلیکیشن‌ها به هر دلیلی (خطای حافظه،
+                Uncaught Exception و...) کرش کند، موتور مانیتورینگ بلافاصله
+                پروسس جدید ایجاد کرده و تا سقف مجاز، سرویس را بالا نگه می‌دارد.
+              </p>
+            </div>
+
+            <div
+              class="bg-zinc-900/50 p-4 rounded-lg border border-zinc-800/50 space-y-2"
+            >
+              <div class="flex items-center gap-2 text-purple-400">
+                <i data-lucide="sparkles" class="w-4 h-4"></i>
+                <h3 class="font-bold text-xs uppercase tracking-wide">
+                  عیب‌یاب مجهز به AI SRE
+                </h3>
+              </div>
+              <p class="text-xs text-slate-400 leading-relaxed">
+                در زمان بروز خطا، نیازی به تحلیل دستی لاگ‌های پیچیده ندارید. با
+                فشردن یک دکمه، هوش مصنوعی لاگ‌های ترمینال را تحلیل کرده و علت
+                دقیق رخداد و راهکار رفع آن را به زبان فارسی ارائه می‌دهد.
+              </p>
+            </div>
+
+            <div
+              class="bg-zinc-900/50 p-4 rounded-lg border border-zinc-800/50 space-y-2"
+            >
+              <div class="flex items-center gap-2 text-amber-400">
+                <i data-lucide="mail" class="w-4 h-4"></i>
+                <h3 class="font-bold text-xs uppercase tracking-wide">
+                  ادغام و فشرده‌سازی دپندسی‌ها
+                </h3>
+              </div>
+              <p class="text-xs text-slate-400 leading-relaxed">
+                با سیستم Dependency Merger، کتابخانه‌های تکراری پروژه‌های
+                زیرمجموعه اسکن شده و به صورت مجتمع به روت اصلی منتقل می‌شوند.
+                این کار باعث کاهش حجم دیسک و سرعت لود فوق‌العاده بالا می‌شود.
+              </p>
+            </div>
+
+            <div
+              class="bg-zinc-900/50 p-4 rounded-lg border border-zinc-800/50 space-y-2"
+            >
+              <div class="flex items-center gap-2 text-red-400">
+                <i data-lucide="bell" class="w-4 h-4"></i>
+                <h3 class="font-bold text-xs uppercase tracking-wide">
+                  سامانه هشدار پیامکی لایو
+                </h3>
+              </div>
+              <p class="text-xs text-slate-400 leading-relaxed">
+                اگر فرآیندی به طور پیاپی کرش کند و به سقف تلاش مجدد برسد،
+                وب‌سرویس پیامکی فعال شده و پیامی با جزئیات دقیق و نام سرویس
+                آسیب‌دیده به شماره موبایل مدیر سیستم ارسال می‌کند.
+              </p>
+            </div>
+
+            <div
+              class="bg-zinc-900/50 p-4 rounded-lg border border-zinc-800/50 space-y-2"
+            >
+              <div class="flex items-center gap-2 text-cyan-400">
+                <i data-lucide="git-branch" class="w-4 h-4"></i>
+                <h3 class="font-bold text-xs uppercase tracking-wide">
+                  آپدیت گروهی سریع (Git Update)
+                </h3>
+              </div>
+              <p class="text-xs text-slate-400 leading-relaxed">
+                می‌توانید کدهای جدید تمام پروژه‌های مجهز به گیت را با فیلتر نام
+                به صورت گروهی پول (Git Pull) کنید، هارد ریست بزنید و پروژه‌ها را
+                به صورت همزمان بیلد و ری‌استارت کنید.
+              </p>
+            </div>
+          </div>
+        </section>
+
+        <!-- Card 4: Setup Guide (Bento Box Column 2 Span) -->
+        <section class="bento-card p-6 md:col-span-2 space-y-4">
+          <div
+            class="flex items-center gap-2.5 text-emerald-400 pb-2 border-b border-zinc-800/60"
+          >
+            <i data-lucide="folder-git" class="w-5 h-5"></i>
+            <h2 class="font-bold text-base text-white">
+              مراحل راه اندازی پروژه های جدید و مدیریت ماژول‌ها
+            </h2>
+          </div>
+
+          <div class="space-y-4">
+            <div class="space-y-2">
+              <h3
+                class="text-xs font-bold text-slate-200 flex items-center gap-1.5"
+              >
+                <span
+                  class="w-5 h-5 rounded-full bg-zinc-800 flex items-center justify-center text-[10px] text-emerald-400"
+                  >۱</span
+                >
+                ایجاد پوشه اپلیکیشن جدید
+              </h3>
+              <p class="text-xs text-slate-400 pr-6 leading-relaxed">
+                یک دایرکتوری جدید با نام دلخواه در دایرکتوری
+                <code
+                  class="text-slate-300 font-mono text-[11px] bg-black px-1.5 py-0.5 rounded"
+                  >apps/</code
+                >
+                واقع در روت اصلی پروژه بسازید. برای مثال:
+                <code
+                  class="text-slate-300 font-mono text-[11px] bg-black px-1.5 py-0.5 rounded"
+                  >apps/my-new-api</code
+                >
+              </p>
+            </div>
+
+            <div class="space-y-2">
+              <h3
+                class="text-xs font-bold text-slate-200 flex items-center gap-1.5"
+              >
+                <span
+                  class="w-5 h-5 rounded-full bg-zinc-800 flex items-center justify-center text-[10px] text-emerald-400"
+                  >۲</span
+                >
+                ایجاد فایل bas.config.json
+              </h3>
+              <p class="text-xs text-slate-400 pr-6 leading-relaxed">
+                داخل پوشه پروژه، یک فایل
+                <code
+                  class="text-emerald-400 font-mono text-[11px] bg-black px-1.5 py-0.5 rounded"
+                  >bas.config.json</code
+                >
+                بسازید و کانفیگ ارکستراتور را در آن قرار دهید. نیازمندی‌های
+                ماژول‌ها را نیز به صورت استاندارد در
+                <code
+                  class="text-slate-300 font-mono text-[11px] bg-black px-1.5 py-0.5 rounded"
+                  >package.json</code
+                >
+                ثبت کنید.
+              </p>
+            </div>
+
+            <div class="space-y-2">
+              <h3
+                class="text-xs font-bold text-slate-200 flex items-center gap-1.5"
+              >
+                <span
+                  class="w-5 h-5 rounded-full bg-zinc-800 flex items-center justify-center text-[10px] text-emerald-400"
+                  >۳</span
+                >
+                عدم نیاز به نصب node_modules اختصاصی (اشتراک‌گذاری خودکار)
+              </h3>
+              <p
+                class="text-xs text-slate-400 pr-6 leading-relaxed text-justify"
+              >
+                <strong>مکانیزم حل خودکار ماژول‌ها در BAS:</strong> بر اساس
+                الگوریتم استاندارد رزولوشن Node.js، در صورتی که پوشه
+                <code class="text-rose-400 font-mono">node_modules</code> در
+                دایرکتوری فرعی یافت نشود، نود به صورت بازگشتی پوشه‌های والد خود
+                را جستجو می‌کند تا به روت اصلی برسد. بنابراین، تمامی سرویس‌ها
+                می‌توانند و باید از
+                <code class="text-emerald-400 font-mono">node_modules</code> روت
+                اصلی استفاده کنند و کدهای پروژه‌ها را تمیزتر و سبک‌تر نگه دارند.
+              </p>
+            </div>
+
+            <div class="space-y-2">
+              <h3
+                class="text-xs font-bold text-slate-200 flex items-center gap-1.5"
+              >
+                <span
+                  class="w-5 h-5 rounded-full bg-zinc-800 flex items-center justify-center text-[10px] text-emerald-400"
+                  >۴</span
+                >
+                نحوه همگام‌سازی و ادغام پکیج‌ها در روت اصلی
+              </h3>
+              <p
+                class="text-xs text-slate-400 pr-6 leading-relaxed text-justify"
+              >
+                پس از ثبت پکیج‌های مورد نیاز در فایل
+                <code class="text-slate-300 font-mono">package.json</code> پروژه
+                خود، در داشبورد دکمه
+                <span class="text-emerald-400 font-bold"
+                  >"ادغام دپندسی‌ها"</span
+                >
+                را انتخاب کنید یا BAS را ری‌استارت کنید. سیستم به صورت تمام
+                اتوماتیک پکیج‌های پروژه‌ها را اسکن کرده، آنها را در
+                <code class="text-slate-300 font-mono">package.json</code> روت
+                اصلی ادغام (Merge) کرده و دستور
+                <code class="text-slate-300 font-mono">npm install</code> را به
+                صورت پس‌زمینه اجرا می‌کند تا ماژول‌ها بدون هیچ کانفیگ دستی
+                مستقیماً برای همه اپ‌ها قابل دسترسی باشند.
+              </p>
+            </div>
+
+            <div class="space-y-2">
+              <h3
+                class="text-xs font-bold text-slate-200 flex items-center gap-1.5"
+              >
+                <span
+                  class="w-5 h-5 rounded-full bg-zinc-800 flex items-center justify-center text-[10px] text-emerald-400"
+                  >۵</span
+                >
+                بررسی داشبورد لایو و استارت
+              </h3>
+              <p class="text-xs text-slate-400 pr-6 leading-relaxed">
+                پنل مدیریت را باز کنید یا رفرش کنید. سیستم به طور خودکار
+                دایرکتوری را اسکن کرده، پروژه جدید را شناسایی می‌کند و در لیست
+                قرار می‌دهد. با فشردن دکمه استارت یا فعال بودن
+                <code class="text-slate-300 font-mono">autoStart</code> پروژه
+                فورا اجرا خواهد شد!
+              </p>
+            </div>
+
+            <div class="space-y-2">
+              <h3
+                class="text-xs font-bold text-slate-200 flex items-center gap-1.5"
+              >
+                <span
+                  class="w-5 h-5 rounded-full bg-zinc-800 flex items-center justify-center text-[10px] text-emerald-400"
+                  >۶</span
+                >
+                نحوه اجرای پروژه‌های فرانت‌اند (React, Vue و غیره)
+              </h3>
+              <p
+                class="text-xs text-slate-400 pr-6 leading-relaxed text-justify"
+              >
+                ابتدا از پروژه فرانت‌اند خود خروجی نهایی (Build) بگیرید (مانند
+                <code
+                  class="text-slate-300 font-mono text-[11px] bg-black px-1.5 py-0.5 rounded"
+                  >npm run build</code
+                >). سپس در فایل
+                <code
+                  class="text-slate-300 font-mono text-[11px] bg-black px-1.5 py-0.5 rounded"
+                  >bas.config.json</code
+                >
+                اپلیکیشن خود، مقدار
+                <code
+                  class="text-emerald-400 font-mono text-[11px] bg-black px-1.5 py-0.5 rounded"
+                  >type</code
+                >
+                را برابر
+                <code
+                  class="text-emerald-400 font-mono text-[11px] bg-black px-1.5 py-0.5 rounded"
+                  >"frontend"</code
+                >
+                و مقدار
+                <code
+                  class="text-emerald-400 font-mono text-[11px] bg-black px-1.5 py-0.5 rounded"
+                  >entry</code
+                >
+                را برابر نام پوشه خروجی (مثلاً
+                <code
+                  class="text-emerald-400 font-mono text-[11px] bg-black px-1.5 py-0.5 rounded"
+                  >"dist"</code
+                >
+                یا
+                <code
+                  class="text-emerald-400 font-mono text-[11px] bg-black px-1.5 py-0.5 rounded"
+                  >"build"</code
+                >) قرار دهید. ارکستراتور به صورت خودکار یک وب‌سرور ایستاتیک برای
+                سرو کردن فایل‌های آن پوشه راه‌اندازی می‌کند.
+              </p>
+            </div>
+          </div>
+        </section>
+
+        <!-- Card 5: Configuration Blueprint -->
+        <section class="bento-card p-6 space-y-4">
+          <div
+            class="flex items-center gap-2.5 text-purple-400 pb-2 border-b border-zinc-800/60"
+          >
+            <i data-lucide="settings" class="w-5 h-5"></i>
+            <h2 class="font-bold text-base text-white">
+              ساختار کانفیگ (bas.config.json)
+            </h2>
+          </div>
+          <p class="text-xs text-slate-400 leading-relaxed">
+            این کانفیگ را درون یک فایل به نام
+            <code
+              class="text-emerald-400 font-mono text-[11px] bg-black px-1 py-0.5 rounded"
+              >bas.config.json</code
+            >
+            در ریشه پروژه فرعی خود قرار دهید:
+          </p>
+          <pre
+            class="bg-black/80 p-3 rounded-lg text-[10.5px] text-slate-300 font-mono overflow-x-auto text-left leading-normal border border-zinc-800"
+          >
+{
+  "name": "درگاه پرداخت BAS",
+  "type": "backend", 
+  "entry": "server.js",
+  "port": 9005,
+  "autoStart": true,
+  "groups": ["payment", "core"]
+}</pre>
+        </section>
+
+        <!-- Card 6: Configuration Options Explained (Full Width) -->
+        <section class="bento-card p-6 md:col-span-3 space-y-4">
+          <div
+            class="flex items-center gap-2.5 text-amber-400 pb-2 border-b border-zinc-800/60"
+          >
+            <i data-lucide="sliders-horizontal" class="w-5 h-5"></i>
+            <h2 class="font-bold text-base text-white">
+              توضیح پارامترهای پیکربندی (BAS Config Schema)
+            </h2>
+          </div>
+
+          <div class="overflow-x-auto">
+            <table
+              class="w-full text-right text-xs text-slate-300 border-collapse"
+            >
+              <thead>
+                <tr
+                  class="border-b border-zinc-800 text-slate-500 uppercase font-mono"
+                >
+                  <th class="py-2.5 px-4 text-right">پارامتر</th>
+                  <th class="py-2.5 px-4 text-right">نوع داده</th>
+                  <th class="py-2.5 px-4 text-right">مقدار پیش‌فرض</th>
+                  <th class="py-2.5 px-4 text-right">توضیحات عملکرد</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-zinc-800/50">
+                <tr>
+                  <td class="py-3 px-4 font-mono text-emerald-400 font-bold">
+                    name
+                  </td>
+                  <td class="py-3 px-4 text-zinc-500">string</td>
+                  <td class="py-3 px-4 text-zinc-600">نام پوشه پروژه</td>
+                  <td class="py-3 px-4">
+                    نام فارسی یا انگلیسی دلخواه که در داشبورد نمایش داده می‌شود.
+                  </td>
+                </tr>
+                <tr>
+                  <td class="py-3 px-4 font-mono text-emerald-400 font-bold">
+                    type
+                  </td>
+                  <td class="py-3 px-4 text-zinc-500">
+                    "backend" | "frontend"
+                  </td>
+                  <td class="py-3 px-4 text-zinc-600">"backend"</td>
+                  <td class="py-3 px-4">
+                    تعیین نوع پروژه. پروژه ایستاتیک (frontend) به صورت خودکار
+                    مجهز به یک وب‌سرور سبک شده و فایل‌های مسیر توزیع را سرو
+                    می‌کند.
+                  </td>
+                </tr>
+                <tr>
+                  <td class="py-3 px-4 font-mono text-emerald-400 font-bold">
+                    entry
+                  </td>
+                  <td class="py-3 px-4 text-zinc-500">string</td>
+                  <td class="py-3 px-4 text-zinc-600">"server.js"</td>
+                  <td class="py-3 px-4">
+                    فایل اجرایی ورودی برای بک‌اند (مثلاً
+                    <code class="font-mono bg-black px-1.5 rounded"
+                      >index.js</code
+                    >
+                    یا
+                    <code class="font-mono bg-black px-1.5 rounded">app.py</code
+                    >) و پوشه توزیع نهایی برای فرانت‌اند (مثلاً
+                    <code class="font-mono bg-black px-1.5 rounded">dist</code>
+                    یا
+                    <code class="font-mono bg-black px-1.5 rounded">build</code
+                    >).
+                  </td>
+                </tr>
+                <tr>
+                  <td class="py-3 px-4 font-mono text-emerald-400 font-bold">
+                    port
+                  </td>
+                  <td class="py-3 px-4 text-zinc-500">number</td>
+                  <td class="py-3 px-4 text-zinc-600">اختصاص پورت خودکار</td>
+                  <td class="py-3 px-4">
+                    شماره پورتی که می‌خواهید پروژه روی آن گوش دهد. در صورت عدم
+                    تنظیم، اولین پورت آزاد از محدوده ۸۰۸۰ به بالا اختصاص
+                    می‌یابد.
+                  </td>
+                </tr>
+                <tr>
+                  <td class="py-3 px-4 font-mono text-emerald-400 font-bold">
+                    autoStart
+                  </td>
+                  <td class="py-3 px-4 text-zinc-500">boolean</td>
+                  <td class="py-3 px-4 text-zinc-600">true</td>
+                  <td class="py-3 px-4">
+                    اگر روی true باشد، به محض اجرای ارکستراتور BAS، پروژه هم به
+                    صورت اتوماتیک استارت می‌شود.
+                  </td>
+                </tr>
+                <tr>
+                  <td class="py-3 px-4 font-mono text-emerald-400 font-bold">
+                    groups
+                  </td>
+                  <td class="py-3 px-4 text-zinc-500">string[]</td>
+                  <td class="py-3 px-4 text-zinc-600">[]</td>
+                  <td class="py-3 px-4">
+                    آرایه‌ای از رشته‌ها برای گروه‌بندی اپ‌ها جهت انجام
+                    عملیات‌های گروهی.
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </main>
+
+      <!-- Footer -->
+      <footer
+        class="mt-12 pt-6 border-t border-zinc-800 text-center text-xs text-zinc-500 font-mono flex flex-col sm:flex-row justify-between items-center gap-4"
+      >
+        <div>&copy; 2026 BAS NODE SRE SYSTEM. ALL RIGHTS RESERVED.</div>
+        <div>ENGINEERED WITH GEMINI PRO & TS ORCHESTRATOR</div>
+      </footer>
+    </div>
+
+    <!-- Initialize Lucide icons -->
+    <script>
+      lucide.createIcons();
+    </script>
+  </body>
+</html>
