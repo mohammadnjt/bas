@@ -2013,9 +2013,14 @@ export default function App() {
         </div>
 
         {/* Powered by blhgroups.ir signature */}
-        {/*  <div className="text-center py-2 text-[11px] font-mono tracking-widest text-slate-500">
-          powered by <span className="text-cyan-400 font-bold tracking-wider">blhgroups</span>
-         </div> */}
+        <div className="text-center pt-4 pb-1 flex flex-col items-center justify-center gap-1.5 opacity-80 hover:opacity-100 transition-opacity">
+          <span className="text-[12px] font-bold text-slate-300">
+            ساخته شده توسط <span className="text-cyan-400 font-black tracking-wide drop-shadow-[0_0_8px_rgba(6,182,212,0.5)]">blhgroups</span>
+          </span>
+          <span className="text-[9px] font-mono font-bold tracking-[0.15em] text-slate-500">
+            ENGINEERED WITH GEMINI PRO & TS ORCHESTRATOR
+          </span>
+        </div>
       </footer>
     </div>
   );
