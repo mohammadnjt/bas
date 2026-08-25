@@ -966,6 +966,23 @@ async function startServer() {
       return next();
     }
 
+    if (req.path === "/api/auth/login" && req.method === "POST") {
+      const { apiKey } = req.body || {};
+      if (apiKey === API_KEY) {
+        failedAttempts.delete(clientIP);
+        logAccess(clientIP, "Successful Login via UI", true);
+        res.cookie("orchestrator_api_key", API_KEY, {
+          path: "/",
+          maxAge: 365 * 24 * 60 * 60 * 1000,
+          sameSite: "lax"
+        });
+        return res.json({ success: true });
+      } else {
+        handleFailedAttempt(clientIP);
+        return res.status(401).json({ error: "Invalid API Key" });
+      }
+    }
+
     // 3. Unauthorized access
     const hasAttemptedAuth = Boolean(headerVal || cookieVal || req.path.startsWith("/api/"));
     if (hasAttemptedAuth) {

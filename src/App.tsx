@@ -26,7 +26,10 @@ import {
   Sliders,
   Send,
   BookOpen,
-  X
+  X,
+  Lock,
+  Key,
+  ArrowRight
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { BasCentralCore, CoreStatus } from "./components/BasCentralCore";
@@ -90,6 +93,11 @@ interface BannedIP {
 }
 
 export default function App() {
+  const [needsLogin, setNeedsLogin] = useState<boolean>(false);
+  const [loginPassword, setLoginPassword] = useState("");
+  const [loginError, setLoginError] = useState("");
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
+
   const [apps, setApps] = useState<AppState[]>([]);
   const [smsGateway, setSmsGateway] = useState<SMSGateway>({
     provider: "kavenegar",
@@ -241,6 +249,13 @@ export default function App() {
   const fetchState = async () => {
     try {
       const res = await fetch("/api/apps", { cache: "no-store" });
+      
+      if (res.status === 401 || res.status === 403) {
+        setNeedsLogin(true);
+        return;
+      }
+      setNeedsLogin(false);
+      
       if (!res.ok) throw new Error("API Connection Failed");
       const data = await res.json();
       
@@ -548,6 +563,29 @@ export default function App() {
     }
   };
 
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsLoggingIn(true);
+    setLoginError("");
+    try {
+      const res = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apiKey: loginPassword })
+      });
+      if (res.ok) {
+        setNeedsLogin(false);
+        fetchState();
+      } else {
+        setLoginError("کلید دسترسی (API Key) نامعتبر است.");
+      }
+    } catch (e) {
+      setLoginError("خطا در ارتباط با سرور. لطفاً دوباره تلاش کنید.");
+    } finally {
+      setIsLoggingIn(false);
+    }
+  };
+
   // Format uptime compactly (e.g., 10s, 10m, 10h, 10d, 400d)
   const formatUptime = (seconds: number) => {
     if (!seconds || seconds <= 0) return "0s";
@@ -559,6 +597,78 @@ export default function App() {
     if (m > 0) return `${m}m`;
     return `${Math.floor(seconds)}s`;
   };
+
+  if (needsLogin) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-[#0A0A0B] bg-[url('/bgbas.png')] bg-cover bg-fixed bg-center p-4 relative" dir="rtl">
+        <div className="absolute inset-0 bg-black/60 backdrop-blur-sm pointer-events-none"></div>
+        <motion.div 
+          initial={{ opacity: 0, scale: 0.95, y: 10 }}
+          animate={{ opacity: 1, scale: 1, y: 0 }}
+          className="relative z-10 w-full max-w-md bg-[#0f172a]/95 border border-slate-700/50 p-8 rounded-2xl shadow-2xl backdrop-blur-xl"
+        >
+          <div className="flex flex-col items-center justify-center mb-8">
+            <div className="w-16 h-16 rounded-2xl bg-gradient-to-tr from-cyan-500/20 to-blue-500/20 border border-cyan-500/30 flex items-center justify-center mb-4 shadow-[0_0_30px_rgba(6,182,212,0.15)]">
+              <Lock className="w-8 h-8 text-cyan-400" />
+            </div>
+            <h1 className="text-2xl font-bold text-white mb-2">ورود به سیستم</h1>
+            <p className="text-sm text-slate-400 text-center">
+              برای دسترسی به داشبورد امنیتی، کلید دسترسی خود را وارد کنید.
+            </p>
+          </div>
+
+          <form onSubmit={handleLogin} className="space-y-6">
+            <div className="space-y-2">
+              <div className="relative">
+                <div className="absolute inset-y-0 right-0 pr-3 flex items-center pointer-events-none">
+                  <Key className="h-5 w-5 text-slate-500" />
+                </div>
+                <input
+                  type="password"
+                  value={loginPassword}
+                  onChange={(e) => setLoginPassword(e.target.value)}
+                  placeholder="کلید عبور (API Key)"
+                  className="block w-full bg-[#0a0f1d] border border-slate-700/50 rounded-xl py-3 pr-10 pl-4 text-slate-200 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 focus:border-cyan-500/50 transition-all text-left"
+                  dir="ltr"
+                  autoFocus
+                />
+              </div>
+              {loginError && (
+                <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="text-sm text-rose-400 mt-2 pr-1">
+                  {loginError}
+                </motion.p>
+              )}
+            </div>
+
+            <button
+              type="submit"
+              disabled={isLoggingIn || !loginPassword}
+              className="w-full flex items-center justify-center gap-2 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-bold rounded-xl py-3 px-4 shadow-[0_0_20px_rgba(6,182,212,0.3)] transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {isLoggingIn ? (
+                <RefreshCw className="w-5 h-5 animate-spin" />
+              ) : (
+                <>
+                  ورود به داشبورد
+                  <ArrowRight className="w-5 h-5 rotate-180" />
+                </>
+              )}
+            </button>
+          </form>
+
+          {/* Footer Branding */}
+          <div className="mt-10 text-center flex flex-col items-center justify-center gap-1.5 opacity-80 hover:opacity-100 transition-opacity">
+            <span className="text-[12px] font-bold text-slate-400">
+              ساخته شده توسط <span className="text-cyan-400 font-black tracking-wide drop-shadow-[0_0_8px_rgba(6,182,212,0.5)]">blhgroups</span>
+            </span>
+            <span className="text-[9px] font-mono font-bold tracking-[0.15em] text-slate-500">
+              ENGINEERED WITH GEMINI PRO & TS ORCHESTRATOR
+            </span>
+          </div>
+        </motion.div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen flex flex-col justify-between bg-[#0A0A0B] bg-[url('/bgbas.png')] bg-cover bg-fixed bg-center text-slate-300 font-sans antialiased selection:bg-emerald-500 selection:text-black p-3 sm:p-5 relative" dir="rtl">
