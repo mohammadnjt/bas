@@ -948,7 +948,7 @@ async function startServer() {
       logAccess(clientIP, "Successful Login via Path", true);
       res.cookie("orchestrator_api_key", API_KEY, {
         path: "/",
-        maxAge: 365 * 24 * 60 * 60 * 1000, // 1 year
+        maxAge: 2 * 60 * 60 * 1000, // 2 hours
         sameSite: "lax"
       });
       return res.redirect("/");
@@ -973,7 +973,7 @@ async function startServer() {
         logAccess(clientIP, "Successful Login via UI", true);
         res.cookie("orchestrator_api_key", API_KEY, {
           path: "/",
-          maxAge: 365 * 24 * 60 * 60 * 1000,
+          maxAge: 2 * 60 * 60 * 1000, // 2 hours
           sameSite: "lax"
         });
         return res.json({ success: true });
