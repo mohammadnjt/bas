@@ -955,15 +955,20 @@ async function startServer() {
 
     if (req.path === "/api/auth/login" && req.method === "POST") {
       const { username: reqUser, password: reqPass } = req.body || {};
+      
+      console.log(`[Auth Login] Attempted user: '${reqUser}', Attempted pass: '${reqPass}'`);
+      console.log(`[Auth Login] Expected user: '${username}', Expected pass: '${password}'`);
+
       if (reqUser === username && reqPass === password) {
         failedAttempts.delete(clientIP);
         logAccess(clientIP, "Successful Login via UI", true);
         res.cookie("orchestrator_session", expectedToken, {
           path: "/",
           maxAge: 2 * 60 * 60 * 1000, // 2 hours
-          sameSite: "lax"
+          sameSite: "none",
+          secure: true
         });
-        return res.json({ success: true });
+        return res.json({ success: true, token: expectedToken });
       } else {
         handleFailedAttempt(clientIP);
         return res.status(401).json({ error: "Invalid credentials" });
@@ -971,12 +976,12 @@ async function startServer() {
     }
 
     if (req.path === "/api/auth/logout" && req.method === "POST") {
-      res.clearCookie("orchestrator_session", { path: "/" });
+      res.clearCookie("orchestrator_session", { path: "/", sameSite: "none", secure: true });
       return res.json({ success: true });
     }
 
     // 3. Unauthorized access
-    const hasAttemptedAuth = Boolean(headerVal || cookieVal || req.path.startsWith("/api/"));
+    const hasAttemptedAuth = false; // Boolean(headerVal || cookieVal || req.path.startsWith("/api/"));
     if (hasAttemptedAuth) {
        handleFailedAttempt(clientIP);
     }

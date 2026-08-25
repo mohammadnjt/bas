@@ -247,10 +247,19 @@ export default function App() {
     } catch (e) {}
   };
 
+  const apiFetch = async (url: string, options: RequestInit = {}) => {
+    const token = localStorage.getItem("orchestrator_token");
+    const headers = { ...options.headers } as any;
+    if (token) {
+      headers["Authorization"] = `Bearer ${token}`;
+    }
+    return fetch(url, { ...options, headers });
+  };
+
   // Load state and apps
   const fetchState = async () => {
     try {
-      const res = await fetch("/api/apps", { cache: "no-store" });
+      const res = await apiFetch("/api/apps", { cache: "no-store" });
       
       if (res.status === 401 || res.status === 403) {
         setNeedsLogin(true);
@@ -291,7 +300,7 @@ export default function App() {
   // Load config once
   const fetchConfig = async () => {
     try {
-      const res = await fetch("/api/config", { cache: "no-store" });
+      const res = await apiFetch("/api/config", { cache: "no-store" });
       if (res.ok) {
         const data = await res.json();
         if (data.settings) setSettings(data.settings);
@@ -309,7 +318,7 @@ export default function App() {
   // Fetch security logs
   const fetchSecurityLogs = async () => {
     try {
-      const res = await fetch("/api/security-logs", { cache: "no-store" });
+      const res = await apiFetch("/api/security-logs", { cache: "no-store" });
       if (res.ok) {
         const data = await res.json();
         setSecurityLogs(data.logs || []);
@@ -323,7 +332,7 @@ export default function App() {
   const handleUnban = async (ip: string) => {
     if (!window.confirm(`آیا از رفع مسدودی آی‌پی ${ip} اطمینان دارید؟`)) return;
     try {
-      const res = await fetch("/api/security/unban", {
+      const res = await apiFetch("/api/security/unban", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ip })
@@ -361,7 +370,7 @@ export default function App() {
   const fetchLogs = async (appId: string) => {
     if (!appId || isLogsPaused) return;
     try {
-      const res = await fetch(`/api/apps/${appId}/logs`, { cache: "no-store" });
+      const res = await apiFetch(`/api/apps/${appId}/logs`, { cache: "no-store" });
       if (res.ok) {
         const data = await res.json();
         setLogs(data.logs || []);
@@ -383,7 +392,7 @@ export default function App() {
   // Clear Logs
   const clearLogs = async (appId: string) => {
     try {
-      await fetch(`/api/apps/${appId}/logs/clear`, { method: "POST" });
+      await apiFetch(`/api/apps/${appId}/logs/clear`, { method: "POST" });
       setLogs([`[${new Date().toISOString()}] [SYSTEM] Logs cleared by user.`]);
     } catch (e) {
       console.error(e);
@@ -412,7 +421,7 @@ export default function App() {
     if (gitRunning || activeTab === "git") {
       const getGitStatus = async () => {
         try {
-          const res = await fetch("/api/apps/git-update/logs", { cache: "no-store" });
+          const res = await apiFetch("/api/apps/git-update/logs", { cache: "no-store" });
           if (res.ok) {
             const data = await res.json();
             setGitLogs(data.logs || []);
@@ -435,7 +444,7 @@ export default function App() {
   // Handle process actions (start, stop, restart)
   const triggerAction = async (id: string, action: "start" | "stop" | "restart") => {
     try {
-      const res = await fetch(`/api/apps/${id}/action`, {
+      const res = await apiFetch(`/api/apps/${id}/action`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action })
@@ -457,7 +466,7 @@ export default function App() {
     setApps(prev => prev.map(a => a.id === id ? { ...a, status: "CRASHED", pid: null, cpu: 0, memory: 0 } : a));
 
     try {
-      const res = await fetch(`/api/apps/${id}/simulate-crash`, {
+      const res = await apiFetch(`/api/apps/${id}/simulate-crash`, {
         method: "POST"
       });
       if (res.ok) {
@@ -478,7 +487,7 @@ export default function App() {
     setIsAnalyzing(true);
     setAiAnalysis("");
     try {
-      const res = await fetch("/api/ai/diagnose", {
+      const res = await apiFetch("/api/ai/diagnose", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ appId: selectedAppId, logs })
@@ -502,13 +511,13 @@ export default function App() {
     setGitRunning(true);
     setGitProgress(0);
     try {
-      await fetch("/api/apps/git-update", {
+      await apiFetch("/api/apps/git-update", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ keyword: gitKeyword })
       });
       // Fetch status immediately to show logs
-      const res = await fetch("/api/apps/git-update/logs", { cache: "no-store" });
+      const res = await apiFetch("/api/apps/git-update/logs", { cache: "no-store" });
       if (res.ok) {
         const data = await res.json();
         setGitLogs(data.logs || []);
@@ -525,7 +534,7 @@ export default function App() {
     setIsMerging(true);
     setMergeMessage("");
     try {
-      const res = await fetch("/api/apps/merge-dependencies", {
+      const res = await apiFetch("/api/apps/merge-dependencies", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ apply })
@@ -549,7 +558,7 @@ export default function App() {
   const saveGatewaySettings = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      const res = await fetch("/api/config", {
+      const res = await apiFetch("/api/config", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -570,12 +579,16 @@ export default function App() {
     setIsLoggingIn(true);
     setLoginError("");
     try {
-      const res = await fetch("/api/auth/login", {
+      const res = await apiFetch("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ username: loginUsername, password: loginPassword })
       });
       if (res.ok) {
+        const data = await res.json();
+        if (data.token) {
+          localStorage.setItem("orchestrator_token", data.token);
+        }
         setNeedsLogin(false);
         fetchState();
       } else {
@@ -590,10 +603,11 @@ export default function App() {
 
   const handleLogout = async () => {
     try {
-      await fetch("/api/auth/logout", { method: "POST" });
+      await apiFetch("/api/auth/logout", { method: "POST" });
     } catch (e) {
       console.error(e);
     }
+    localStorage.removeItem("orchestrator_token");
     setNeedsLogin(true);
     setLoginUsername("");
     setLoginPassword("");
