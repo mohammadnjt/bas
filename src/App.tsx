@@ -46,6 +46,8 @@ interface AppState {
   port: number;
   autoStart: boolean;
   groups?: string[];
+  alertEnabled?: boolean;
+  alertThreshold?: number;
   status: "RUNNING" | "STOPPED" | "CRASHED" | "STARTING" | "BUILDING";
   pid: number | null;
   restarts: number;
@@ -551,6 +553,21 @@ export default function App() {
       setMergeMessage("⚠️ خطا در پردازش فایل‌های پکیج.");
     } finally {
       setIsMerging(false);
+    }
+  };
+
+  const updateAppAlertConfig = async (appId: string, updates: { alertEnabled?: boolean, alertThreshold?: number }) => {
+    try {
+      const res = await apiFetch(`/api/apps/${appId}/config`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(updates)
+      });
+      if (res.ok) {
+        setApps(apps.map(a => a.id === appId ? { ...a, ...updates } : a));
+      }
+    } catch (e) {
+      console.error(e);
     }
   };
 
@@ -1672,7 +1689,7 @@ export default function App() {
               </div>
 
               {/* Form Grid */}
-              <form onSubmit={saveGatewaySettings} className="grid grid-cols-1 lg:grid-cols-2 gap-6 h-full w-full max-w-[1500px] mx-auto flex-1">
+              <form onSubmit={saveGatewaySettings} className="grid grid-cols-1 lg:grid-cols-3 gap-6 h-full w-full max-w-[1500px] mx-auto flex-1">
                 
                 {/* Pane 1: SMS Gateway (Right side visually due to RTL) */}
                 <div className="bg-[#050b14]/60 backdrop-blur-2xl border border-[#82aaff]/30 rounded-2xl overflow-hidden flex flex-col shadow-[0_0_30px_rgba(130,170,255,0.05)] relative group" dir="rtl">
@@ -1807,6 +1824,52 @@ export default function App() {
 
                   </div>
                 </div>
+
+                {/* Pane 3: App SMS Settings */}
+                <div className="bg-[#050b14]/60 backdrop-blur-2xl border border-[#82aaff]/30 rounded-2xl overflow-hidden flex flex-col shadow-[0_0_30px_rgba(130,170,255,0.05)] relative group" dir="rtl">
+                   <div className="absolute inset-0 bg-gradient-to-br from-[#82aaff]/5 to-transparent pointer-events-none" />
+                  
+                  {/* Top Bar */}
+                  <div className="flex justify-between items-center pt-3 px-3 h-12 border-b border-[#82aaff]/10">
+                    <div className="flex items-stretch h-6 filter drop-shadow-md">
+                      <div className="bg-cyan-500 text-[#1a1b26] flex items-center px-4 font-mono text-[11px] font-bold rounded-r-sm z-10">
+                        پیامک پروژه‌ها
+                      </div>
+                      <div className="w-0 h-0 border-y-[12px] border-y-transparent border-r-[12px] border-r-cyan-500 relative z-20"></div>
+                    </div>
+                  </div>
+                  
+                  {/* Content */}
+                  <div className="flex-1 p-6 text-sm overflow-y-auto z-10 space-y-4">
+                     {apps.map(app => (
+                        <div key={app.id} className="flex flex-col gap-3 p-3 bg-[#0a101d]/50 rounded-lg border border-[#82aaff]/10">
+                           <div className="flex justify-between items-center">
+                              <span className="text-[#c0caf5] font-bold truncate max-w-[150px]">{app.name}</span>
+                              <label className="relative inline-flex items-center cursor-pointer shrink-0">
+                                <input
+                                  type="checkbox"
+                                  checked={app.alertEnabled !== false}
+                                  onChange={(e) => updateAppAlertConfig(app.id, { alertEnabled: e.target.checked })}
+                                  className="sr-only peer"
+                                />
+                                <div className="w-9 h-5 bg-[#1e2030] border border-[#82aaff]/30 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-[#c0caf5] after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-cyan-500 peer-checked:border-cyan-500 peer-checked:after:bg-[#1a1b26]"></div>
+                              </label>
+                           </div>
+                           <div className="flex justify-between items-center text-[11px] text-[#c0caf5]/70">
+                              <span>تعداد کرش قبل از پیامک:</span>
+                              <input 
+                                type="number" 
+                                min="1" 
+                                value={app.alertThreshold ?? 5} 
+                                onChange={(e) => updateAppAlertConfig(app.id, { alertThreshold: parseInt(e.target.value) || 5 })}
+                                className="w-16 bg-[#1e2030] border border-[#82aaff]/30 rounded px-2 py-1 text-center outline-none focus:border-[#82aaff] font-mono text-cyan-300"
+                              />
+                           </div>
+                        </div>
+                     ))}
+                  </div>
+                </div>
+
               </form>
             </motion.div>
           )}

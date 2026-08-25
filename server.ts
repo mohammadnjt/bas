@@ -54,6 +54,8 @@ interface AppConfig {
   autoStart: boolean;
   version?: string;
   groups?: string[];
+  alertEnabled?: boolean;
+  alertThreshold?: number;
 }
 
 interface SMSGatewayConfig {
@@ -82,6 +84,7 @@ interface AppRuntimeState {
   status: "RUNNING" | "STOPPED" | "CRASHED" | "STARTING" | "BUILDING";
   pid: number | null;
   restarts: number;
+  crashCount: number;
   cpu: number;
   memory: number;
   uptime: number; // in seconds
@@ -271,10 +274,15 @@ function startApp(id: string) {
           // Crashed!
           state.status = "CRASHED";
           state.lastCrashTime = new Date().toISOString();
+          state.crashCount += 1;
           addLog(id, `[SYSTEM] CRASH DETECTED! Exit code: ${code}, signal: ${signal}. Triggering Orchestrator Recovery...`, "system");
           
-          // Trigger SMS Alert
-          triggerSMSAlert(id, state.config.name);
+          // Trigger SMS Alert based on project settings
+          const alertEnabled = state.config.alertEnabled !== false; // Default true if undefined
+          const alertThreshold = state.config.alertThreshold ?? 5; // Default 5 crashes
+          if (alertEnabled && state.crashCount % alertThreshold === 0) {
+             triggerSMSAlert(id, state.config.name);
+          }
 
           // Auto-Restart logic
           if (config.settings.autoRestart && state.restarts < config.settings.maxRestarts) {
@@ -405,9 +413,14 @@ function simulateAppCrash(id: string): boolean {
   state.pid = null;
   state.cpu = 0;
   state.memory = 0;
+  state.crashCount += 1;
 
-  // Trigger SMS Alert
-  triggerSMSAlert(id, state.config.name);
+  // Trigger SMS Alert based on project settings
+  const alertEnabled = state.config.alertEnabled !== false;
+  const alertThreshold = state.config.alertThreshold ?? 5;
+  if (alertEnabled && state.crashCount % alertThreshold === 0) {
+     triggerSMSAlert(id, state.config.name);
+  }
 
   // Auto-Restart logic (give 3 seconds of visible crash state before auto-recovering so user sees the crash)
   if (config.settings.autoRestart && state.restarts < config.settings.maxRestarts) {
@@ -577,6 +590,7 @@ function scanAppsDirectory(force = false) {
           status: "STOPPED",
           pid: null,
           restarts: 0,
+          crashCount: 0,
           cpu: 0,
           memory: 0,
           uptime: 0,
@@ -737,6 +751,7 @@ function initOrchestrator() {
       status: "STOPPED",
       pid: null,
       restarts: 0,
+          crashCount: 0,
       cpu: 0,
       memory: 0,
       uptime: 0,
@@ -1022,9 +1037,12 @@ async function startServer() {
       port: state.config.port,
       autoStart: state.config.autoStart,
       groups: state.config.groups,
+      alertEnabled: state.config.alertEnabled,
+      alertThreshold: state.config.alertThreshold,
       status: state.status,
       pid: state.pid,
       restarts: state.restarts,
+      crashCount: state.crashCount,
       cpu: state.cpu,
       memory: state.memory,
       uptime: state.uptime,
@@ -1094,6 +1112,30 @@ async function startServer() {
     }
     state.logs = [`[${new Date().toISOString()}] [SYSTEM] Logs cleared by user.`];
     res.json({ status: "success" });
+  });
+
+  // API: Update App Config
+  app.post("/api/apps/:id/config", (req, res) => {
+    const { id } = req.params;
+    const updates = req.body;
+    const state = appStates.get(id);
+
+    if (!state) {
+      res.status(404).json({ error: "App not found" });
+      return;
+    }
+
+    // Update in memory runtime state
+    state.config = { ...state.config, ...updates };
+    
+    // Update in config.json array
+    const configAppIndex = config.apps.findIndex(a => a.id === id);
+    if (configAppIndex > -1) {
+      config.apps[configAppIndex] = { ...config.apps[configAppIndex], ...updates };
+      saveConfig();
+    }
+
+    res.json({ status: "success", config: state.config });
   });
 
   // API: Process Actions (start, stop, restart)
@@ -1482,6 +1524,7 @@ ${logsContext}
       status: "STOPPED",
       pid: null,
       restarts: 0,
+          crashCount: 0,
       cpu: 0,
       memory: 0,
       uptime: 0,
