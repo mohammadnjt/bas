@@ -844,37 +844,39 @@ function resolveServerPort(): number {
   return 3000;
 }
 
-// Helper to resolve the Admin API Key dynamically from environment variables, .env, or .env.example
-function resolveApiKey(): string {
-  // 1. Check .env file first (allows overriding or clearing)
+// Helper to resolve the Admin credentials dynamically from environment variables or .env
+function resolveAdminCredentials(): { username?: string; password?: string } {
+  let username = process.env.ADMIN_USERNAME || "admin";
+  let password = process.env.ADMIN_PASSWORD;
+
   const envPath = path.resolve(process.cwd(), ".env");
   if (fs.existsSync(envPath)) {
     try {
       const content = fs.readFileSync(envPath, "utf-8");
-      const match = content.match(/^(?:ADMIN_API_KEY|BAS_API_KEY|DASHBOARD_API_KEY)\s*=\s*(.*)$/m);
-      if (match) {
-        const val = match[1].trim().replace(/^['"]|['"]$/g, ""); // strip quotes
-        if (!val || val === "none" || val === "false" || val === "your-api-key-here" || val === "your_secure_api_key_here" || val === "MY_API_KEY") {
-          return "";
-        }
-        return val;
+      
+      const userMatch = content.match(/^ADMIN_USERNAME\s*=\s*(.*)$/m);
+      if (userMatch) {
+        username = userMatch[1].trim().replace(/^['"]|['"]$/g, "");
+      }
+      
+      const passMatch = content.match(/^ADMIN_PASSWORD\s*=\s*(.*)$/m);
+      if (passMatch) {
+        password = passMatch[1].trim().replace(/^['"]|['"]$/g, "");
       }
     } catch (e) {
-      console.error("[Orchestrator] Error reading .env file for API_KEY:", e);
+      console.error("[Orchestrator] Error reading .env file for Admin credentials:", e);
     }
   }
 
-  // 2. Try explicit dashboard admin keys (avoid generic API_KEY which is reserved for AI SDKs)
-  const envAdminKey = process.env.ADMIN_API_KEY || process.env.BAS_API_KEY || process.env.DASHBOARD_API_KEY;
-  if (envAdminKey && envAdminKey.trim() !== "") {
-    const val = envAdminKey.trim().replace(/^['"]|['"]$/g, "");
-    if (val === "none" || val === "false" || val === "your-api-key-here" || val === "your_secure_api_key_here" || val === "MY_API_KEY") {
-      return "";
-    }
-    return val;
+  if (!username) {
+    username = "admin";
   }
 
-  return "";
+  if (!password || password === "none" || password === "false") {
+    password = "admin"; // Default password if none provided, ensuring it is never completely open
+  }
+
+  return { username, password };
 }
 
 // Simple cookie parser helper
@@ -931,47 +933,32 @@ async function startServer() {
       }
     }
 
-    const API_KEY = resolveApiKey();
-    if (!API_KEY) {
+    const { username, password } = resolveAdminCredentials();
+    if (!password) {
       return next();
     }
 
-    const loginPath = "/" + API_KEY;
-    let reqPathDecoded = req.path;
-    try {
-      reqPathDecoded = decodeURIComponent(req.path);
-    } catch (e) {}
+    const expectedToken = Buffer.from(`${username}:${password}`).toString("base64");
 
-    // 1. Check if the path matches the API key exactly to authenticate
-    if (reqPathDecoded === loginPath || reqPathDecoded === loginPath + "/") {
-      failedAttempts.delete(clientIP);
-      logAccess(clientIP, "Successful Login via Path", true);
-      res.cookie("orchestrator_api_key", API_KEY, {
-        path: "/",
-        maxAge: 2 * 60 * 60 * 1000, // 2 hours
-        sameSite: "lax"
-      });
-      return res.redirect("/");
-    }
-
-    // 2. Extract and check the cookie or x-api-key header
-    const cookieVal = getCookie(req.headers.cookie, "orchestrator_api_key");
-    const headerVal = req.headers["x-api-key"];
-    const isAuthenticated = (cookieVal === API_KEY) || (headerVal === API_KEY);
+    // 1. Extract and check the cookie or auth header
+    const cookieVal = getCookie(req.headers.cookie, "orchestrator_session");
+    const headerVal = req.headers["x-api-key"] || req.headers["authorization"]?.replace("Bearer ", "");
+    
+    const isAuthenticated = (cookieVal === expectedToken) || (headerVal === expectedToken);
 
     if (isAuthenticated) {
-      if (headerVal === API_KEY) {
+      if (headerVal === expectedToken) {
          failedAttempts.delete(clientIP);
       }
       return next();
     }
 
     if (req.path === "/api/auth/login" && req.method === "POST") {
-      const { apiKey } = req.body || {};
-      if (apiKey === API_KEY) {
+      const { username: reqUser, password: reqPass } = req.body || {};
+      if (reqUser === username && reqPass === password) {
         failedAttempts.delete(clientIP);
         logAccess(clientIP, "Successful Login via UI", true);
-        res.cookie("orchestrator_api_key", API_KEY, {
+        res.cookie("orchestrator_session", expectedToken, {
           path: "/",
           maxAge: 2 * 60 * 60 * 1000, // 2 hours
           sameSite: "lax"
@@ -979,8 +966,13 @@ async function startServer() {
         return res.json({ success: true });
       } else {
         handleFailedAttempt(clientIP);
-        return res.status(401).json({ error: "Invalid API Key" });
+        return res.status(401).json({ error: "Invalid credentials" });
       }
+    }
+
+    if (req.path === "/api/auth/logout" && req.method === "POST") {
+      res.clearCookie("orchestrator_session", { path: "/" });
+      return res.json({ success: true });
     }
 
     // 3. Unauthorized access
@@ -1525,9 +1517,7 @@ ${logsContext}
   }
 
   app.listen(PORT, "0.0.0.0", () => {
-    const API_KEY = resolveApiKey();
-    const suffix = API_KEY ? `/${API_KEY}` : "";
-    console.log(`[Orchestrator Web Panel] Server actively running on http://localhost:${PORT}${suffix}`);
+    console.log(`[Orchestrator Web Panel] Server actively running on http://localhost:${PORT}`);
   });
 }
 

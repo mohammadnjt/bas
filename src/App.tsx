@@ -29,7 +29,8 @@ import {
   X,
   Lock,
   Key,
-  ArrowRight
+  ArrowRight,
+  LogOut
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { BasCentralCore, CoreStatus } from "./components/BasCentralCore";
@@ -94,6 +95,7 @@ interface BannedIP {
 
 export default function App() {
   const [needsLogin, setNeedsLogin] = useState<boolean>(false);
+  const [loginUsername, setLoginUsername] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
   const [loginError, setLoginError] = useState("");
   const [isLoggingIn, setIsLoggingIn] = useState(false);
@@ -571,19 +573,30 @@ export default function App() {
       const res = await fetch("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ apiKey: loginPassword })
+        body: JSON.stringify({ username: loginUsername, password: loginPassword })
       });
       if (res.ok) {
         setNeedsLogin(false);
         fetchState();
       } else {
-        setLoginError("کلید دسترسی (API Key) نامعتبر است.");
+        setLoginError("نام کاربری یا رمز عبور نامعتبر است.");
       }
     } catch (e) {
       setLoginError("خطا در ارتباط با سرور. لطفاً دوباره تلاش کنید.");
     } finally {
       setIsLoggingIn(false);
     }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await fetch("/api/auth/logout", { method: "POST" });
+    } catch (e) {
+      console.error(e);
+    }
+    setNeedsLogin(true);
+    setLoginUsername("");
+    setLoginPassword("");
   };
 
   // Format uptime compactly (e.g., 10s, 10m, 10h, 10d, 400d)
@@ -600,8 +613,8 @@ export default function App() {
 
   if (needsLogin) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-[#0A0A0B] bg-[url('/bgbas.png')] bg-cover bg-fixed bg-center p-4 relative" dir="rtl">
-        <div className="absolute inset-0 bg-black/60 backdrop-blur-sm pointer-events-none"></div>
+      <div className="min-h-screen flex items-center justify-center bg-[#0A0A0B] bg-cover bg-fixed bg-center p-4 relative" style={{ backgroundImage: "url('/bgbas.png')" }} dir="rtl">
+        <div className="absolute inset-0 bg-black/40 backdrop-blur-[2px] pointer-events-none"></div>
         <motion.div 
           initial={{ opacity: 0, scale: 0.95, y: 10 }}
           animate={{ opacity: 1, scale: 1, y: 0 }}
@@ -613,12 +626,23 @@ export default function App() {
             </div>
             <h1 className="text-2xl font-bold text-white mb-2">ورود به سیستم</h1>
             <p className="text-sm text-slate-400 text-center">
-              برای دسترسی به داشبورد امنیتی، کلید دسترسی خود را وارد کنید.
+              برای دسترسی به داشبورد امنیتی، مشخصات خود را وارد کنید.
             </p>
           </div>
 
           <form onSubmit={handleLogin} className="space-y-6">
-            <div className="space-y-2">
+            <div className="space-y-4">
+              <div className="relative">
+                <input
+                  type="text"
+                  value={loginUsername}
+                  onChange={(e) => setLoginUsername(e.target.value)}
+                  placeholder="نام کاربری"
+                  className="block w-full bg-[#0a0f1d] border border-slate-700/50 rounded-xl py-3 px-4 text-slate-200 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 focus:border-cyan-500/50 transition-all text-left"
+                  dir="ltr"
+                  autoFocus
+                />
+              </div>
               <div className="relative">
                 <div className="absolute inset-y-0 right-0 pr-3 flex items-center pointer-events-none">
                   <Key className="h-5 w-5 text-slate-500" />
@@ -627,10 +651,9 @@ export default function App() {
                   type="password"
                   value={loginPassword}
                   onChange={(e) => setLoginPassword(e.target.value)}
-                  placeholder="کلید عبور (API Key)"
+                  placeholder="رمز عبور"
                   className="block w-full bg-[#0a0f1d] border border-slate-700/50 rounded-xl py-3 pr-10 pl-4 text-slate-200 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 focus:border-cyan-500/50 transition-all text-left"
                   dir="ltr"
-                  autoFocus
                 />
               </div>
               {loginError && (
@@ -642,7 +665,7 @@ export default function App() {
 
             <button
               type="submit"
-              disabled={isLoggingIn || !loginPassword}
+              disabled={isLoggingIn || !loginPassword || !loginUsername}
               className="w-full flex items-center justify-center gap-2 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-bold rounded-xl py-3 px-4 shadow-[0_0_20px_rgba(6,182,212,0.3)] transition-all disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {isLoggingIn ? (
@@ -657,22 +680,25 @@ export default function App() {
           </form>
 
           {/* Footer Branding */}
-          <div className="mt-10 text-center flex flex-col items-center justify-center gap-1.5 opacity-80 hover:opacity-100 transition-opacity">
-            <span className="text-[12px] font-bold text-slate-400">
-              ساخته شده توسط <span className="text-cyan-400 font-black tracking-wide drop-shadow-[0_0_8px_rgba(6,182,212,0.5)]">blhgroups</span>
-            </span>
-            <span className="text-[9px] font-mono font-bold tracking-[0.15em] text-slate-500">
-              ENGINEERED WITH GEMINI PRO & TS ORCHESTRATOR
-            </span>
-          </div>
         </motion.div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen flex flex-col justify-between bg-[#0A0A0B] bg-[url('/bgbas.png')] bg-cover bg-fixed bg-center text-slate-300 font-sans antialiased selection:bg-emerald-500 selection:text-black p-3 sm:p-5 relative" dir="rtl">
+    <div className="min-h-screen flex flex-col justify-between bg-[#0A0A0B] bg-cover bg-fixed bg-center text-slate-300 font-sans antialiased selection:bg-emerald-500 selection:text-black p-3 sm:p-5 relative" style={{ backgroundImage: "url('/bgbas.png')" }} dir="rtl">
       
+      {/* Top Right Floating Quick-Action Icons */}
+      <div className="fixed top-4 right-4 sm:top-5 sm:right-6 z-40 flex items-center gap-2">
+        <button
+          onClick={handleLogout}
+          className="w-10 h-10 rounded-xl bg-[#06111e]/85 backdrop-blur-md border border-[#0d3b5e]/80 hover:border-rose-500/80 text-rose-400 hover:text-rose-300 flex items-center justify-center shadow-[0_0_15px_rgba(244,63,94,0.2)] transition-all duration-300"
+          title="خروج از حساب"
+        >
+          <LogOut className="w-5 h-5" />
+        </button>
+      </div>
+
       {/* Top Left Floating Quick-Action Icons */}
       <div className="fixed top-4 left-4 sm:top-5 sm:left-6 z-40 flex items-center gap-2">
         {/* Auto Discovery Guide Icon Button */}
@@ -2120,16 +2146,6 @@ export default function App() {
             );
           })()}
 
-        </div>
-
-        {/* Powered by blhgroups.ir signature */}
-        <div className="text-center pt-4 pb-1 flex flex-col items-center justify-center gap-1.5 opacity-80 hover:opacity-100 transition-opacity">
-          <span className="text-[12px] font-bold text-slate-300">
-            ساخته شده توسط <span className="text-cyan-400 font-black tracking-wide drop-shadow-[0_0_8px_rgba(6,182,212,0.5)]">blhgroups</span>
-          </span>
-          <span className="text-[9px] font-mono font-bold tracking-[0.15em] text-slate-500">
-            ENGINEERED WITH GEMINI PRO & TS ORCHESTRATOR
-          </span>
         </div>
       </footer>
     </div>
