@@ -30,11 +30,15 @@ import {
   Lock,
   Key,
   ArrowRight,
-  LogOut
+  LogOut,
+  Gauge,
+  HardDrive,
+  Layers
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { BasCentralCore, CoreStatus } from "./components/BasCentralCore";
 import { SineWaveMonitor } from "./components/SineWaveMonitor";
+import { HtopMonitorModal, DetailedMemory, CpuCoreMetric } from "./components/HtopMonitorModal";
 
 interface AppState {
   id: string;
@@ -79,7 +83,20 @@ interface SystemMetrics {
   totalMemory: number;
   nodeVersion: string;
   platform: string;
-  uptime: number;
+  uptime?: number;
+  serverUptime?: number;
+  processUptime?: number;
+  memory?: DetailedMemory;
+  coresCount?: number;
+  cpuModel?: string;
+  cpuSpeedMhz?: number;
+  cores?: CpuCoreMetric[];
+  loadAvg?: [number, number, number];
+  hostname?: string;
+  arch?: string;
+  kernel?: string;
+  appsCpuTotal?: number;
+  appsMemoryTotal?: number;
 }
 
 interface AccessLog {
@@ -146,6 +163,7 @@ export default function App() {
   const [aiAnalysis, setAiAnalysis] = useState<string>("");
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [showAutoDiscoveryGuide, setShowAutoDiscoveryGuide] = useState(false);
+  const [showHtopModal, setShowHtopModal] = useState(false);
 
   // Pagination for 4-card layout around central core
   const [overviewPage, setOverviewPage] = useState(0);
@@ -848,6 +866,20 @@ export default function App() {
         >
           <BookOpen className="w-5 h-5" />
         </a>
+
+        {/* HTOP Live Hardware Telemetry Button */}
+        <button
+          type="button"
+          onClick={() => setShowHtopModal(true)}
+          className="h-10 px-3 rounded-xl flex items-center gap-2 transition-all duration-300 backdrop-blur-md border bg-[#06111e]/85 hover:bg-[#081a2e] text-emerald-400 hover:text-emerald-300 border-[#0d3b5e]/80 hover:border-cyan-400/80 shadow-[0_0_15px_rgba(16,185,129,0.2)] font-mono text-xs font-bold"
+          title="کنسول دقیق مانیتورینگ سخت‌افزار (HTOP)"
+        >
+          <Gauge className="w-4 h-4 text-cyan-400 animate-pulse" />
+          <span className="hidden sm:inline font-sans text-[11px]">سخت‌افزار سرور</span>
+          <span className="text-[10px] text-cyan-300 bg-cyan-950/80 px-1.5 py-0.5 rounded border border-cyan-700/50" dir="ltr">
+            {systemMetrics.coresCount ? `${systemMetrics.coresCount}C` : "CPU"} • {systemMetrics.totalCpu}%
+          </span>
+        </button>
       </div>
 
       {/* Main Layout: Right Menu (3 items) - Content (Center) - Left Menu (3 items) */}
@@ -1097,7 +1129,7 @@ export default function App() {
                       <div className="space-y-2 font-mono text-[10px] py-0.5">
                         {/* CPU LOAD */}
                         <div className="flex items-center gap-2">
-                          <span className="text-emerald-400 font-bold w-12 text-left">{app.cpu}%</span>
+                          <span className="text-emerald-400 font-bold w-12 text-left">{app.cpu.toFixed(1)}%</span>
                           <div className="flex-1 h-1.5 bg-[#030914] border border-cyan-950/90 rounded-full overflow-hidden p-[0.5px]">
                             <div
                               className={`h-full bg-gradient-to-r ${theme.barGradient} rounded-full transition-all duration-700 ${theme.barShadow}`}
@@ -1109,11 +1141,15 @@ export default function App() {
 
                         {/* MEMORY */}
                         <div className="flex items-center gap-2">
-                          <span className="text-cyan-400 font-bold w-14 text-left whitespace-nowrap">MB {app.memory}</span>
+                          <span className="text-cyan-400 font-bold w-14 text-left whitespace-nowrap">
+                            {app.memory >= 1024 ? `${(app.memory / 1024).toFixed(1)} GB` : `${app.memory.toFixed(1)} MB`}
+                          </span>
                           <div className="flex-1 h-1.5 bg-[#030914] border border-cyan-950/90 rounded-full overflow-hidden p-[0.5px]">
                             <div
                               className="h-full bg-gradient-to-r from-blue-600 via-cyan-500 to-cyan-300 rounded-full transition-all duration-700 shadow-[0_0_8px_rgba(6,182,212,0.6)]"
-                              style={{ width: `${Math.min(100, Math.max(5, (app.memory / 60) * 100))}%` }}
+                              style={{ 
+                                width: `${Math.min(100, Math.max(5, systemMetrics.memory?.totalMb ? (app.memory / systemMetrics.memory.totalMb) * 100 * 5 : (app.memory / 60) * 100))}%` 
+                              }}
                             />
                           </div>
                           <span className="text-slate-400 uppercase font-bold tracking-wider w-16 text-right text-[9px]">MEMORY</span>
@@ -2125,12 +2161,22 @@ export default function App() {
           </div>
 
           {/* Card 3: System Resources (xl:col-span-3) */}
-          <div className="xl:col-span-3 bg-[#06111e]/85 backdrop-blur-md border border-[#0d3b5e]/70 rounded-xl p-3.5 flex flex-col justify-between gap-2 shadow-[0_0_20px_rgba(0,180,255,0.07)] hover:border-[#145388] transition-all">
+          <div 
+            onClick={() => setShowHtopModal(true)}
+            className="xl:col-span-3 bg-[#06111e]/85 backdrop-blur-md border border-[#0d3b5e]/70 rounded-xl p-3 flex flex-col justify-between gap-2 shadow-[0_0_20px_rgba(0,180,255,0.07)] hover:border-cyan-400/70 hover:bg-[#071628] transition-all cursor-pointer group relative overflow-hidden"
+          >
             <div className="flex items-center justify-between">
-              <span className="text-[11px] font-bold text-slate-200">منابع سیستم</span>
-              <span className="text-[9px] font-mono text-cyan-400/80 uppercase">SYSTEM RESOURCES</span>
+              <div className="flex items-center gap-1.5">
+                <span className="text-[11px] font-bold text-slate-200">منابع سخت‌افزار</span>
+                <span className="text-[8px] bg-cyan-950 text-cyan-400 border border-cyan-500/40 px-1.5 py-0.2 rounded font-mono font-bold group-hover:bg-cyan-400 group-hover:text-black transition-colors">
+                  HTOP LIVE ↗
+                </span>
+              </div>
+              <span className="text-[9px] font-mono text-cyan-400/80 uppercase">
+                {systemMetrics.coresCount ? `${systemMetrics.coresCount} CORES` : "SYSTEM"}
+              </span>
             </div>
-            <div className="space-y-2">
+            <div className="space-y-1.5">
               {/* CPU */}
               <div className="flex items-center gap-2 text-[10px] font-mono" dir="ltr">
                 <span className="text-slate-400 w-8 font-bold">CPU</span>
@@ -2148,11 +2194,23 @@ export default function App() {
                 <div className="flex-1 h-2 bg-slate-900/90 rounded-full overflow-hidden border border-cyan-950/80 p-[1px]">
                   <div
                     className="h-full bg-gradient-to-r from-blue-600 via-cyan-500 to-cyan-400 rounded-full transition-all duration-500 shadow-[0_0_8px_rgba(6,182,212,0.7)]"
-                    style={{ width: `${Math.min(100, Math.max(8, Math.round(((systemMetrics.totalMemory || 0) / 1024) * 100)))}%` }}
+                    style={{ width: `${Math.min(100, Math.max(8, systemMetrics.memory?.usedPercent || Math.round(((systemMetrics.totalMemory || 0) / 1024) * 100)))}%` }}
                   />
                 </div>
-                <span className="text-amber-300 font-bold w-16 text-right whitespace-nowrap">{systemMetrics.totalMemory || 0} MB</span>
+                <span className="text-cyan-300 font-bold text-right whitespace-nowrap text-[10px]">
+                  {systemMetrics.memory ? `${(systemMetrics.memory.usedMb >= 1024 ? `${(systemMetrics.memory.usedMb / 1024).toFixed(1)}G` : `${systemMetrics.memory.usedMb}M`)} / ${(systemMetrics.memory.totalMb >= 1024 ? `${(systemMetrics.memory.totalMb / 1024).toFixed(1)}G` : `${systemMetrics.memory.totalMb}M`)}` : `${systemMetrics.totalMemory || 0} MB`}
+                </span>
               </div>
+            </div>
+
+            {/* Quick HTOP info line */}
+            <div className="flex items-center justify-between text-[9px] text-slate-400 pt-1 border-t border-[#0d3b5e]/40 font-mono" dir="rtl">
+              <span className="text-emerald-400 font-sans truncate">
+                رم آزاد: <strong className="font-mono" dir="ltr">{systemMetrics.memory ? (systemMetrics.memory.freeMb >= 1024 ? `${(systemMetrics.memory.freeMb / 1024).toFixed(1)} GB` : `${systemMetrics.memory.freeMb} MB`) : "---"}</strong>
+              </span>
+              <span className="text-slate-400 shrink-0">
+                هسته‌ها: <strong className="text-cyan-300 font-mono" dir="ltr">{systemMetrics.coresCount || 1} Core</strong>
+              </span>
             </div>
           </div>
 
@@ -2253,6 +2311,16 @@ export default function App() {
 
         </div>
       </footer>
+
+      {/* HTOP Hardware Monitor Modal */}
+      <HtopMonitorModal
+        isOpen={showHtopModal}
+        onClose={() => setShowHtopModal(false)}
+        systemMetrics={systemMetrics}
+        apps={apps}
+        onRefresh={fetchState}
+        isRefreshing={isRefreshing}
+      />
     </div>
   );
 }

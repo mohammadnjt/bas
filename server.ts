@@ -1,6 +1,7 @@
 import express from "express";
 import path from "path";
 import fs from "fs";
+import os from "os";
 import { exec, spawn, ChildProcess } from "child_process";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, ThinkingLevel } from "@google/genai";
@@ -106,6 +107,134 @@ let gitUpdateLogs: string[] = [];
 let gitUpdateRunning = false;
 let gitUpdateProgress = 0;
 let lastScanTime = 0;
+
+// System Hardware & HTOP Telemetry
+export interface CpuCoreMetric {
+  core: number;
+  usage: number; // 0-100%
+  speed: number;
+  model: string;
+}
+
+interface PrevCpuTimes {
+  idle: number;
+  total: number;
+}
+
+let lastCpuTimes: PrevCpuTimes[] = [];
+let cachedCoresMetric: CpuCoreMetric[] = [];
+
+function sampleCpuTicks(): CpuCoreMetric[] {
+  try {
+    const cpus = os.cpus() || [];
+    if (cpus.length === 0) return [];
+
+    const currentTimes = cpus.map((cpu) => {
+      const times = cpu.times;
+      const total = times.user + times.nice + times.sys + times.idle + times.irq;
+      return { idle: times.idle, total };
+    });
+
+    const coreResults: CpuCoreMetric[] = [];
+
+    if (lastCpuTimes.length === currentTimes.length) {
+      for (let i = 0; i < currentTimes.length; i++) {
+        const prev = lastCpuTimes[i];
+        const curr = currentTimes[i];
+        const totalDiff = curr.total - prev.total;
+        const idleDiff = curr.idle - prev.idle;
+        const usage = totalDiff > 0 ? Math.max(0, Math.min(100, Math.round(((totalDiff - idleDiff) / totalDiff) * 1000) / 10)) : 0;
+        coreResults.push({
+          core: i + 1,
+          usage,
+          speed: cpus[i]?.speed || 0,
+          model: cpus[i]?.model || "CPU"
+        });
+      }
+    } else {
+      for (let i = 0; i < currentTimes.length; i++) {
+        const times = cpus[i].times;
+        const total = times.user + times.nice + times.sys + times.idle + times.irq;
+        const usage = total > 0 ? Math.max(0, Math.min(100, Math.round(((total - times.idle) / total) * 1000) / 10)) : 0;
+        coreResults.push({
+          core: i + 1,
+          usage,
+          speed: cpus[i]?.speed || 0,
+          model: cpus[i]?.model || "CPU"
+        });
+      }
+    }
+
+    lastCpuTimes = currentTimes;
+    cachedCoresMetric = coreResults;
+    return coreResults;
+  } catch (e) {
+    return cachedCoresMetric;
+  }
+}
+
+function getDetailedMemory() {
+  let totalMb = Math.round(os.totalmem() / (1024 * 1024));
+  let freeMb = Math.round(os.freemem() / (1024 * 1024));
+  let availableMb = freeMb;
+  let cachedMb = 0;
+  let buffersMb = 0;
+  let swapTotalMb = 0;
+  let swapFreeMb = 0;
+  let swapUsedMb = 0;
+
+  try {
+    if (fs.existsSync("/proc/meminfo")) {
+      const content = fs.readFileSync("/proc/meminfo", "utf-8");
+      const lines = content.split("\n");
+      const map: Record<string, number> = {};
+      for (const line of lines) {
+        const parts = line.split(":");
+        if (parts.length >= 2) {
+          const key = parts[0].trim();
+          const val = parseInt(parts[1].trim().split(/\s+/)[0], 10);
+          if (!isNaN(val)) {
+            map[key] = val; // in kB
+          }
+        }
+      }
+      if (map["MemTotal"]) totalMb = Math.round(map["MemTotal"] / 1024);
+      if (map["MemFree"]) freeMb = Math.round(map["MemFree"] / 1024);
+      if (map["MemAvailable"]) availableMb = Math.round(map["MemAvailable"] / 1024);
+      else availableMb = freeMb + Math.round((map["Cached"] || 0) / 1024) + Math.round((map["Buffers"] || 0) / 1024);
+      if (map["Cached"]) cachedMb = Math.round(map["Cached"] / 1024);
+      if (map["Buffers"]) buffersMb = Math.round(map["Buffers"] / 1024);
+      if (map["SwapTotal"]) swapTotalMb = Math.round(map["SwapTotal"] / 1024);
+      if (map["SwapFree"]) swapFreeMb = Math.round(map["SwapFree"] / 1024);
+      swapUsedMb = Math.max(0, swapTotalMb - swapFreeMb);
+    }
+  } catch (e) {
+    // fallback to standard Node os.freemem
+  }
+
+  const usedMb = Math.max(0, totalMb - availableMb);
+  const usedPercent = totalMb > 0 ? parseFloat(((usedMb / totalMb) * 100).toFixed(1)) : 0;
+  const freePercent = totalMb > 0 ? parseFloat(((freeMb / totalMb) * 100).toFixed(1)) : 0;
+  const availablePercent = totalMb > 0 ? parseFloat(((availableMb / totalMb) * 100).toFixed(1)) : 0;
+
+  return {
+    totalMb,
+    usedMb,
+    freeMb,
+    availableMb,
+    cachedMb,
+    buffersMb,
+    usedPercent,
+    freePercent,
+    availablePercent,
+    swapTotalMb,
+    swapUsedMb,
+    swapFreeMb
+  };
+}
+
+// Initial sample
+sampleCpuTicks();
 
 // Load Config File
 const configPath = path.resolve(process.cwd(), "config.json");
@@ -817,6 +946,9 @@ function initOrchestrator() {
         state.memory = 0;
       }
     });
+
+    // Update system CPU ticks
+    sampleCpuTicks();
   }, 1000);
 }
 
@@ -1050,16 +1182,43 @@ async function startServer() {
       logCount: state.logs.length
     }));
 
+    const detailedMem = getDetailedMemory();
+    const coreMetrics = cachedCoresMetric.length > 0 ? cachedCoresMetric : sampleCpuTicks();
+    const totalHostCpu = coreMetrics.length > 0
+      ? parseFloat((coreMetrics.reduce((acc, c) => acc + c.usage, 0) / coreMetrics.length).toFixed(1))
+      : parseFloat(Array.from(appStates.values()).reduce((acc, s) => acc + s.cpu, 0).toFixed(1));
+
+    const appsCpuTotal = parseFloat(Array.from(appStates.values()).reduce((acc, s) => acc + s.cpu, 0).toFixed(1));
+    const appsMemoryTotal = parseFloat(Array.from(appStates.values()).reduce((acc, s) => acc + s.memory, 0).toFixed(1));
+
+    const cpusInfo = os.cpus() || [];
+    const cpuModel = cpusInfo[0]?.model || "x86_64 Processor";
+    const cpuSpeedMhz = cpusInfo[0]?.speed || 0;
+    const coresCount = cpusInfo.length || 1;
+    const loadAvg = (os.loadavg() || [0, 0, 0]).map((v) => parseFloat(v.toFixed(2)));
+
     res.json({
       apps: appsList,
       settings: config.settings,
       smsGateway: config.smsGateway,
       systemMetrics: {
-        totalCpu: parseFloat(Array.from(appStates.values()).reduce((acc, s) => acc + s.cpu, 0).toFixed(1)),
-        totalMemory: parseFloat(Array.from(appStates.values()).reduce((acc, s) => acc + s.memory, 0).toFixed(1)) + 120, // include system overhead
-        nodeVersion: process.version,
+        totalCpu: totalHostCpu,
+        totalMemory: detailedMem.usedMb,
+        memory: detailedMem,
+        coresCount,
+        cpuModel,
+        cpuSpeedMhz,
+        cores: coreMetrics,
+        loadAvg,
+        hostname: os.hostname(),
         platform: process.platform,
-        uptime: process.uptime()
+        arch: os.arch(),
+        kernel: `${os.type()} ${os.release()}`,
+        serverUptime: Math.floor(os.uptime()),
+        processUptime: Math.floor(process.uptime()),
+        nodeVersion: process.version,
+        appsCpuTotal,
+        appsMemoryTotal
       }
     });
   });
