@@ -96,7 +96,9 @@ interface BannedIP {
 }
 
 export default function App() {
-  const [needsLogin, setNeedsLogin] = useState<boolean>(false);
+  const [needsLogin, setNeedsLogin] = useState<boolean>(() => {
+    return !localStorage.getItem("orchestrator_token");
+  });
   const [loginUsername, setLoginUsername] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
   const [loginError, setLoginError] = useState("");
@@ -255,11 +257,16 @@ export default function App() {
     if (token) {
       headers["Authorization"] = `Bearer ${token}`;
     }
-    return fetch(url, { ...options, headers });
+    const res = await fetch(url, { ...options, headers });
+    if ((res.status === 401 || res.status === 403) && url !== "/api/auth/login") {
+      setNeedsLogin(true);
+    }
+    return res;
   };
 
   // Load state and apps
   const fetchState = async () => {
+    if (needsLogin) return;
     try {
       const res = await apiFetch("/api/apps", { cache: "no-store" });
       
@@ -294,13 +301,16 @@ export default function App() {
         setSelectedAppId(data.apps[0].id);
       }
     } catch (err) {
-      console.error("Failed to fetch state:", err);
-      setConnectionError(true);
+      if (!needsLogin) {
+        console.error("Failed to fetch state:", err);
+        setConnectionError(true);
+      }
     }
   };
 
   // Load config once
   const fetchConfig = async () => {
+    if (needsLogin) return;
     try {
       const res = await apiFetch("/api/config", { cache: "no-store" });
       if (res.ok) {
@@ -309,25 +319,36 @@ export default function App() {
         if (data.smsGateway) setSmsGateway(data.smsGateway);
       }
     } catch (err) {
-      console.error("Failed to fetch config:", err);
+      if (!needsLogin) {
+        console.error("Failed to fetch config:", err);
+      }
     }
   };
 
   useEffect(() => {
-    fetchConfig();
-  }, []);
+    if (!needsLogin) {
+      fetchConfig();
+    }
+  }, [needsLogin]);
 
   // Fetch security logs
   const fetchSecurityLogs = async () => {
+    if (needsLogin) return;
     try {
       const res = await apiFetch("/api/security-logs", { cache: "no-store" });
+      if (res.status === 401 || res.status === 403) {
+        setNeedsLogin(true);
+        return;
+      }
       if (res.ok) {
         const data = await res.json();
         setSecurityLogs(data.logs || []);
         setBannedIPs(data.bannedIPs || []);
       }
     } catch (err) {
-      console.error("Failed to fetch security logs:", err);
+      if (!needsLogin) {
+        console.error("Failed to fetch security logs:", err);
+      }
     }
   };
 
@@ -349,8 +370,10 @@ export default function App() {
     }
   };
 
-  // Poll app states and security logs every 1.5 seconds
+  // Poll app states and security logs every 1.5 seconds only when logged in
   useEffect(() => {
+    if (needsLogin) return;
+
     fetchState();
     fetchSecurityLogs();
     const interval = setInterval(() => {
@@ -358,19 +381,19 @@ export default function App() {
       fetchSecurityLogs();
     }, 1500);
     return () => clearInterval(interval);
-  }, [selectedAppId]);
+  }, [selectedAppId, needsLogin]);
 
   const [lastSeenBannedCount, setLastSeenBannedCount] = useState(0);
 
   useEffect(() => {
-    if (activeTab === "security") {
+    if (activeTab === "security" && !needsLogin) {
       setLastSeenBannedCount(bannedIPs.length);
     }
-  }, [activeTab, bannedIPs.length]);
+  }, [activeTab, bannedIPs.length, needsLogin]);
 
   // Fetch logs for selected app
   const fetchLogs = async (appId: string) => {
-    if (!appId || isLogsPaused) return;
+    if (!appId || isLogsPaused || needsLogin) return;
     try {
       const res = await apiFetch(`/api/apps/${appId}/logs`, { cache: "no-store" });
       if (res.ok) {
@@ -378,18 +401,21 @@ export default function App() {
         setLogs(data.logs || []);
       }
     } catch (err) {
-      console.error("Failed to fetch logs:", err);
+      if (!needsLogin) {
+        console.error("Failed to fetch logs:", err);
+      }
     }
   };
 
   // Periodically fetch logs for selected app in Logs tab
   useEffect(() => {
+    if (needsLogin) return;
     if (activeTab === "logs" && selectedAppId && !isLogsPaused) {
       fetchLogs(selectedAppId);
       const logInterval = setInterval(() => fetchLogs(selectedAppId), 1500);
       return () => clearInterval(logInterval);
     }
-  }, [selectedAppId, activeTab, isLogsPaused]);
+  }, [selectedAppId, activeTab, isLogsPaused, needsLogin]);
 
   // Clear Logs
   const clearLogs = async (appId: string) => {
@@ -418,7 +444,9 @@ export default function App() {
       logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
     }
   }, [logs, isAutoScrollEnabled]);
+
   useEffect(() => {
+    if (needsLogin) return;
     let gitInterval: NodeJS.Timeout;
     if (gitRunning || activeTab === "git") {
       const getGitStatus = async () => {
@@ -436,7 +464,7 @@ export default function App() {
       gitInterval = setInterval(getGitStatus, 1000);
     }
     return () => clearInterval(gitInterval);
-  }, [gitRunning, activeTab]);
+  }, [gitRunning, activeTab, needsLogin]);
 
   // Scroll to bottom of logs
   useEffect(() => {
@@ -1597,7 +1625,7 @@ export default function App() {
                             <div className="flex flex-wrap gap-1.5 mt-3" dir="ltr">
                               {Object.entries(app.dependencies).map(([dep, ver]) => (
                                 <span key={dep} className="text-[10px] font-mono bg-[#1e2030] text-[#c0caf5] px-2 py-0.5 rounded-md border border-[#82aaff]/20 flex items-center gap-1.5 shadow-sm">
-                                  {dep} <span className="text-[#82aaff] opacity-80">{ver}</span>
+                                  {dep} <span className="text-[#82aaff] opacity-80">{String(ver)}</span>
                                 </span>
                               ))}
                             </div>
