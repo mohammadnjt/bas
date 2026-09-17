@@ -33,7 +33,17 @@ import {
   LogOut,
   Gauge,
   HardDrive,
-  Layers
+  Layers,
+  User,
+  KeyRound,
+  Eye,
+  EyeOff,
+  Copy,
+  Trash2,
+  Tag,
+  Check,
+  FolderGit2,
+  Boxes
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { BasCentralCore, CoreStatus } from "./components/BasCentralCore";
@@ -202,7 +212,22 @@ export default function App() {
   }, []);
 
   // Git update state
+  const [gitTargetType, setGitTargetType] = useState<"service" | "group" | "all">("service");
+  const [gitSelectedService, setGitSelectedService] = useState<string>("");
+  const [gitSelectedGroup, setGitSelectedGroup] = useState<string>("");
   const [gitKeyword, setGitKeyword] = useState("");
+  const [gitUsername, setGitUsername] = useState<string>(() => localStorage.getItem("git_username") || "");
+  const [gitPassword, setGitPassword] = useState<string>(() => localStorage.getItem("git_password") || "");
+  const [gitBranch, setGitBranch] = useState<string>("");
+  const [gitUrl, setGitUrl] = useState<string>("");
+  const [gitRememberCreds, setGitRememberCreds] = useState<boolean>(true);
+  const [showGitPassword, setShowGitPassword] = useState<boolean>(false);
+  const [gitAuthRequired, setGitAuthRequired] = useState<boolean>(false);
+  const [gitForceClean, setGitForceClean] = useState<boolean>(true);
+  const [gitAutoInstall, setGitAutoInstall] = useState<boolean>(true);
+  const [gitAutoBuild, setGitAutoBuild] = useState<boolean>(true);
+  const [gitAutoScroll, setGitAutoScroll] = useState<boolean>(true);
+  const [gitCopied, setGitCopied] = useState<boolean>(false);
   const [gitLogs, setGitLogs] = useState<string[]>([]);
   const [gitProgress, setGitProgress] = useState(0);
   const [gitRunning, setGitRunning] = useState(false);
@@ -475,19 +500,24 @@ export default function App() {
             setGitLogs(data.logs || []);
             setGitRunning(data.running);
             setGitProgress(data.progress);
+            if (data.authRequired) {
+              setGitAuthRequired(true);
+            }
           }
         } catch (e) {}
       };
       getGitStatus();
-      gitInterval = setInterval(getGitStatus, 1000);
+      gitInterval = setInterval(getGitStatus, gitRunning ? 700 : 2000);
     }
     return () => clearInterval(gitInterval);
   }, [gitRunning, activeTab, needsLogin]);
 
-  // Scroll to bottom of logs
+  // Scroll to bottom of git logs when new logs arrive (if autoScroll is enabled)
   useEffect(() => {
-    gitLogsEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [gitLogs]);
+    if (gitAutoScroll) {
+      gitLogsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [gitLogs, gitAutoScroll]);
 
   // Handle process actions (start, stop, restart)
   const triggerAction = async (id: string, action: "start" | "stop" | "restart") => {
@@ -554,27 +584,121 @@ export default function App() {
     }
   };
 
-  // Run git batch update
+  // Available groups dynamically extracted from configured apps
+  const availableGroups = React.useMemo(() => {
+    const set = new Set<string>();
+    apps.forEach(a => {
+      if (a.groups && Array.isArray(a.groups)) {
+        a.groups.forEach(g => {
+          if (g && g.trim()) set.add(g.trim());
+        });
+      }
+    });
+    return Array.from(set).sort();
+  }, [apps]);
+
+  // Target apps calculation based on current selection
+  const targetedGitApps = React.useMemo(() => {
+    if (gitTargetType === "all") {
+      return apps;
+    }
+    if (gitTargetType === "group") {
+      if (!gitSelectedGroup) return [];
+      const grp = gitSelectedGroup.toLowerCase();
+      return apps.filter(a => a.groups?.some(g => g.toLowerCase() === grp || g.toLowerCase().includes(grp)));
+    }
+    if (gitTargetType === "service") {
+      if (gitSelectedService) {
+        return apps.filter(a => a.id === gitSelectedService || a.name === gitSelectedService);
+      }
+      if (gitKeyword.trim()) {
+        const kw = gitKeyword.trim().toLowerCase();
+        return apps.filter(a => 
+          a.name.toLowerCase().includes(kw) || 
+          a.id.toLowerCase().includes(kw) || 
+          a.path.toLowerCase().includes(kw) ||
+          a.groups?.some(g => g.toLowerCase().includes(kw))
+        );
+      }
+      return [];
+    }
+    return [];
+  }, [apps, gitTargetType, gitSelectedGroup, gitSelectedService, gitKeyword]);
+
+  // Run git batch update with authentication & parameters
   const runGitUpdate = async () => {
+    if (gitRememberCreds) {
+      if (gitUsername) localStorage.setItem("git_username", gitUsername);
+      else localStorage.removeItem("git_username");
+      if (gitPassword) localStorage.setItem("git_password", gitPassword);
+      else localStorage.removeItem("git_password");
+    } else {
+      localStorage.removeItem("git_username");
+      localStorage.removeItem("git_password");
+    }
+
     setGitRunning(true);
-    setGitProgress(0);
+    setGitProgress(5);
+    setGitAuthRequired(false);
+
+    let targetVal = "";
+    if (gitTargetType === "group") {
+      targetVal = gitSelectedGroup;
+    } else if (gitTargetType === "service") {
+      targetVal = gitSelectedService || gitKeyword;
+    } else {
+      targetVal = "";
+    }
+
     try {
       await apiFetch("/api/apps/git-update", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ keyword: gitKeyword })
+        body: JSON.stringify({
+          targetType: gitTargetType,
+          targetValue: targetVal,
+          keyword: gitKeyword,
+          username: gitUsername.trim(),
+          password: gitPassword.trim(),
+          branch: gitBranch.trim(),
+          gitUrl: gitUrl.trim(),
+          forceClean: gitForceClean,
+          autoInstall: gitAutoInstall,
+          autoBuild: gitAutoBuild
+        })
       });
-      // Fetch status immediately to show logs
+
+      // Fetch status immediately to show startup logs
       const res = await apiFetch("/api/apps/git-update/logs", { cache: "no-store" });
       if (res.ok) {
         const data = await res.json();
         setGitLogs(data.logs || []);
         setGitRunning(data.running);
         setGitProgress(data.progress);
+        if (data.authRequired) setGitAuthRequired(true);
       }
     } catch (e) {
       setGitRunning(false);
     }
+  };
+
+  // Clear Git Terminal Logs
+  const clearGitTerminal = async () => {
+    try {
+      await apiFetch("/api/apps/git-update/clear", { method: "POST" });
+      setGitLogs([]);
+      setGitAuthRequired(false);
+    } catch (e) {
+      setGitLogs([]);
+    }
+  };
+
+  // Copy Git logs to clipboard
+  const copyGitLogs = () => {
+    if (gitLogs.length === 0) return;
+    navigator.clipboard.writeText(gitLogs.join("\n"));
+    setGitCopied(true);
+    setTimeout(() => setGitCopied(false), 2000);
   };
 
   // Scan and merge dependencies
@@ -1498,77 +1622,411 @@ export default function App() {
               transition={{ duration: 0.3, ease: "easeOut" }}
               className="w-full h-full flex flex-col my-auto min-h-[65vh] xl:min-h-[75vh]"
             >
-              {/* Top Card for Text */}
-              <div className="bg-[#050b14]/60 backdrop-blur-2xl border border-[#82aaff]/30 rounded-2xl p-6 mb-6 shadow-[0_0_30px_rgba(130,170,255,0.05)] relative overflow-hidden group" dir="rtl">
+              {/* Header Info Banner */}
+              <div className="bg-[#050b14]/60 backdrop-blur-2xl border border-[#82aaff]/30 rounded-2xl p-5 mb-6 shadow-[0_0_30px_rgba(130,170,255,0.05)] relative overflow-hidden group" dir="rtl">
                 <div className="absolute inset-0 bg-gradient-to-r from-[#82aaff]/5 to-transparent pointer-events-none" />
-                <h3 className="text-sm font-bold text-cyan-300 flex items-center gap-2 relative z-10">
-                  <GitBranch className="w-4 h-4 text-[#82aaff]" />
-                  سیستم به‌روزرسانی و همگام‌سازی ابری
-                </h3>
-                <p className="text-[11px] text-[#c0caf5]/70 mt-1 relative z-10">
-                  جهت همگام‌سازی کدها از مخزن (Repository)، یک کلمه کلیدی از نام سرویس را وارد کرده و فرآیند واکشی را آغاز کنید.
-                </p>
+                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 relative z-10">
+                  <div>
+                    <h3 className="text-sm font-bold text-cyan-300 flex items-center gap-2">
+                      <GitBranch className="w-4 h-4 text-[#82aaff]" />
+                      سیستم مدیریت و بروزرسانی گیت (Git Batch Updater)
+                    </h3>
+                    <p className="text-[11px] text-[#c0caf5]/70 mt-1">
+                      بروزرسانی مستقیم کدهای مخزن، مدیریت هوشمند احراز هویت (Username / Token)، بیلد اتوماتیک و نمایش لاگ‌های زنده ترمینال.
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className={`px-2.5 py-1 rounded-lg text-[10px] font-mono font-bold border flex items-center gap-1.5 ${
+                      gitRunning 
+                        ? "bg-amber-500/10 text-amber-300 border-amber-500/30 animate-pulse" 
+                        : gitAuthRequired 
+                        ? "bg-rose-500/10 text-rose-300 border-rose-500/30" 
+                        : "bg-emerald-500/10 text-emerald-300 border-emerald-500/30"
+                    }`}>
+                      <span className={`w-2 h-2 rounded-full ${gitRunning ? "bg-amber-400 animate-ping" : gitAuthRequired ? "bg-rose-400" : "bg-emerald-400"}`} />
+                      {gitRunning ? "در حال اجرای عملیات..." : gitAuthRequired ? "نیاز به احراز هویت" : "آماده به‌روزرسانی"}
+                    </span>
+                  </div>
+                </div>
               </div>
 
-              {/* Grid */}
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 h-full w-full max-w-[1500px] mx-auto flex-1">
-                {/* Pane 1: Control (Right side) */}
-                <div className="bg-[#050b14]/60 backdrop-blur-2xl border border-[#82aaff]/30 rounded-2xl overflow-hidden flex flex-col h-full shadow-[0_0_30px_rgba(130,170,255,0.05)] relative group" dir="rtl">
+              {/* Authentication Alert if git requires login */}
+              {gitAuthRequired && (
+                <motion.div
+                  initial={{ opacity: 0, y: -10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="bg-amber-500/10 border border-amber-500/30 rounded-2xl p-4 mb-6 text-amber-200 text-xs flex items-start gap-3 shadow-[0_0_20px_rgba(245,158,11,0.1)]"
+                  dir="rtl"
+                >
+                  <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+                  <div className="space-y-1">
+                    <div className="font-bold text-amber-300">توجه: مخزن گیت نیازمند احراز هویت (نام کاربری و توکن/رمز عبور) است!</div>
+                    <div className="text-[11px] text-amber-200/80 leading-relaxed">
+                      به دلیل خصوصی بودن مخزن (Private Repository) یا انقضای نشست، گیت اجازه دریافت کدها را نداد. لطفاً نام کاربری و رمز یا <strong>Personal Access Token (PAT)</strong> خود را در بخش زیر وارد کرده و دکمه بروزرسانی را مجدداً بزنید.
+                    </div>
+                  </div>
+                </motion.div>
+              )}
+
+              {/* Grid Layout */}
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 h-full w-full max-w-[1600px] mx-auto flex-1">
+                {/* Pane 1: Control & Auth Panel (5 cols) */}
+                <div className="lg:col-span-5 bg-[#050b14]/60 backdrop-blur-2xl border border-[#82aaff]/30 rounded-2xl overflow-hidden flex flex-col shadow-[0_0_30px_rgba(130,170,255,0.05)] relative group" dir="rtl">
                   <div className="absolute inset-0 bg-gradient-to-br from-[#82aaff]/5 to-transparent pointer-events-none" />
                   
                   {/* Top Bar */}
-                  <div className="flex justify-between items-center pt-3 px-3 h-12 border-b border-[#82aaff]/10">
-                    <div className="flex items-stretch h-6 filter drop-shadow-md">
-                      <div className="bg-[#82aaff] text-[#1a1b26] flex items-center px-4 text-[11px] font-bold rounded-r-sm z-10">
-                        کنترلر بروزرسانی
-                      </div>
-                      <div className="w-0 h-0 border-y-[12px] border-y-transparent border-r-[12px] border-r-[#82aaff] relative z-20"></div>
+                  <div className="flex justify-between items-center px-4 h-12 border-b border-[#82aaff]/10">
+                    <div className="flex items-center gap-2 text-xs font-bold text-[#82aaff]">
+                      <Sliders className="w-4 h-4" />
+                      تنظیمات هدف و اعتبارسنجی
                     </div>
+                    <span className="text-[10px] font-mono text-[#c0caf5]/60">
+                      {targetedGitApps.length} سرویس انتخاب شده
+                    </span>
                   </div>
 
-                  {/* Content */}
-                  <div className="flex-1 p-6 text-sm overflow-y-auto z-10 flex flex-col justify-center space-y-6">
-                    <div className="space-y-3">
-                      <label className="flex items-center gap-2 text-[#c0caf5] font-bold text-xs">
-                        فیلتر نام سرویس (اختیاری)
+                  {/* Form Content */}
+                  <div className="flex-1 p-5 space-y-5 overflow-y-auto text-xs">
+                    {/* Target Mode Selector */}
+                    <div className="space-y-2">
+                      <label className="text-[#c0caf5] font-bold text-[11px] flex items-center gap-1.5">
+                        <Boxes className="w-3.5 h-3.5 text-[#82aaff]" />
+                        محدوده اجرای بروزرسانی:
                       </label>
-                      <input
-                        type="text"
-                        value={gitKeyword}
-                        onChange={(e) => setGitKeyword(e.target.value)}
-                        placeholder="مثلا: auth یا api..."
-                        disabled={gitRunning}
-                        className="w-full bg-[#0a101d]/50 border border-[#82aaff]/20 rounded-xl p-3.5 text-[#c0caf5] focus:outline-none focus:border-[#82aaff]/60 focus:ring-1 focus:ring-[#82aaff]/30 transition-all font-mono text-left disabled:opacity-50 text-[13px]"
-                        dir="ltr"
-                      />
+                      <div className="grid grid-cols-3 gap-2 p-1 bg-[#0a101d]/70 border border-[#82aaff]/20 rounded-xl">
+                        <button
+                          type="button"
+                          onClick={() => setGitTargetType("service")}
+                          disabled={gitRunning}
+                          className={`py-2 px-2 rounded-lg font-bold text-[11px] transition-all text-center ${
+                            gitTargetType === "service"
+                              ? "bg-[#82aaff] text-[#1a1b26] shadow-md shadow-[#82aaff]/20"
+                              : "text-[#c0caf5]/70 hover:text-[#c0caf5]"
+                          }`}
+                        >
+                          سرویس مشخص
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setGitTargetType("group")}
+                          disabled={gitRunning}
+                          className={`py-2 px-2 rounded-lg font-bold text-[11px] transition-all text-center ${
+                            gitTargetType === "group"
+                              ? "bg-[#82aaff] text-[#1a1b26] shadow-md shadow-[#82aaff]/20"
+                              : "text-[#c0caf5]/70 hover:text-[#c0caf5]"
+                          }`}
+                        >
+                          بر اساس گروه
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setGitTargetType("all")}
+                          disabled={gitRunning}
+                          className={`py-2 px-2 rounded-lg font-bold text-[11px] transition-all text-center ${
+                            gitTargetType === "all"
+                              ? "bg-[#82aaff] text-[#1a1b26] shadow-md shadow-[#82aaff]/20"
+                              : "text-[#c0caf5]/70 hover:text-[#c0caf5]"
+                          }`}
+                        >
+                          همه سرویس‌ها
+                        </button>
+                      </div>
                     </div>
-                    
-                    <button
-                      onClick={runGitUpdate}
-                      disabled={gitRunning}
-                      className="w-full py-4 px-4 bg-[#1e2030] hover:bg-[#82aaff] hover:text-[#1a1b26] text-[#c0caf5] rounded-xl text-[13px] font-bold transition-all border border-[#82aaff]/20 shadow-[0_0_10px_rgba(130,170,255,0.05)] hover:shadow-[0_0_15px_rgba(130,170,255,0.2)] disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-                    >
-                      {gitRunning ? (
-                        <>
-                          <RefreshCw className="w-4 h-4 animate-spin" />
-                          در حال واکشی اطلاعات...
-                        </>
-                      ) : (
-                        <>
-                          <GitBranch className="w-4 h-4" />
-                          اجرای فرآیند بروزرسانی
-                        </>
-                      )}
-                    </button>
 
-                    <div className="mt-6">
-                      <div className="flex justify-between text-[10px] text-[#c0caf5]/60 mb-2 font-mono" dir="ltr">
-                        <span>Progress</span>
+                    {/* Target Specific Selection */}
+                    {gitTargetType === "service" && (
+                      <div className="space-y-2 p-3 bg-[#0a101d]/40 border border-[#82aaff]/15 rounded-xl">
+                        <label className="text-[#c0caf5]/90 text-[11px] font-semibold flex items-center justify-between">
+                          <span>انتخاب یا جستجوی سرویس (Source Name):</span>
+                          {gitSelectedService && (
+                            <button
+                              type="button"
+                              onClick={() => { setGitSelectedService(""); setGitKeyword(""); }}
+                              className="text-[10px] text-cyan-400 hover:underline"
+                            >
+                              پاک‌کردن
+                            </button>
+                          )}
+                        </label>
+                        <div className="space-y-2">
+                          <select
+                            value={gitSelectedService}
+                            onChange={(e) => {
+                              setGitSelectedService(e.target.value);
+                              setGitKeyword(e.target.value);
+                            }}
+                            disabled={gitRunning}
+                            className="w-full bg-[#0a101d] border border-[#82aaff]/20 rounded-xl p-2.5 text-[#c0caf5] text-[12px] focus:outline-none focus:border-[#82aaff]/60"
+                            dir="ltr"
+                          >
+                            <option value="">-- انتخاب از لیست سرویس‌های موجود --</option>
+                            {apps.map((app) => (
+                              <option key={app.id} value={app.id}>
+                                {app.name} ({app.id}) - {app.type}
+                              </option>
+                            ))}
+                          </select>
+                          <div className="relative">
+                            <input
+                              type="text"
+                              value={gitKeyword}
+                              onChange={(e) => {
+                                setGitKeyword(e.target.value);
+                                if (gitSelectedService && e.target.value !== gitSelectedService) {
+                                  setGitSelectedService("");
+                                }
+                              }}
+                              placeholder="یا کلمه کلیدی نام سرویس (مثلا: auth, api, dashboard)..."
+                              disabled={gitRunning}
+                              className="w-full bg-[#0a101d] border border-[#82aaff]/20 rounded-xl p-2.5 text-[#c0caf5] text-[12px] focus:outline-none focus:border-[#82aaff]/60 font-mono text-left"
+                              dir="ltr"
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {gitTargetType === "group" && (
+                      <div className="space-y-2 p-3 bg-[#0a101d]/40 border border-[#82aaff]/15 rounded-xl">
+                        <label className="text-[#c0caf5]/90 text-[11px] font-semibold flex items-center justify-between">
+                          <span className="flex items-center gap-1">
+                            <Tag className="w-3.5 h-3.5 text-[#82aaff]" />
+                            انتخاب گروه سرویس‌ها:
+                          </span>
+                        </label>
+                        {availableGroups.length > 0 ? (
+                          <div className="space-y-2">
+                            <select
+                              value={gitSelectedGroup}
+                              onChange={(e) => setGitSelectedGroup(e.target.value)}
+                              disabled={gitRunning}
+                              className="w-full bg-[#0a101d] border border-[#82aaff]/20 rounded-xl p-2.5 text-[#c0caf5] text-[12px] focus:outline-none focus:border-[#82aaff]/60 font-mono"
+                              dir="ltr"
+                            >
+                              <option value="">-- انتخاب گروه --</option>
+                              {availableGroups.map((grp) => (
+                                <option key={grp} value={grp}>
+                                  گروه: {grp}
+                                </option>
+                              ))}
+                            </select>
+                            <input
+                              type="text"
+                              value={gitSelectedGroup}
+                              onChange={(e) => setGitSelectedGroup(e.target.value)}
+                              placeholder="یا تایپ نام گروه..."
+                              disabled={gitRunning}
+                              className="w-full bg-[#0a101d] border border-[#82aaff]/20 rounded-xl p-2.5 text-[#c0caf5] text-[12px] focus:outline-none focus:border-[#82aaff]/60 font-mono text-left"
+                              dir="ltr"
+                            />
+                          </div>
+                        ) : (
+                          <div className="text-[11px] text-amber-300/80 p-2 bg-amber-500/10 rounded-lg">
+                            هیچ گروهی در فایل تنظیمات سرویس‌ها تعریف نشده است. می‌توانید نام گروه را دستی وارد کنید:
+                            <input
+                              type="text"
+                              value={gitSelectedGroup}
+                              onChange={(e) => setGitSelectedGroup(e.target.value)}
+                              placeholder="نام گروه (مثلا: core, frontend)..."
+                              disabled={gitRunning}
+                              className="w-full mt-2 bg-[#0a101d] border border-[#82aaff]/20 rounded-xl p-2 text-[#c0caf5] text-[12px] font-mono text-left"
+                              dir="ltr"
+                            />
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Targeted Apps Preview Badge */}
+                    <div className="p-2.5 bg-[#0a101d]/60 border border-[#82aaff]/15 rounded-xl flex items-center justify-between">
+                      <span className="text-[11px] text-[#c0caf5]/70">سرویس‌های تحت تاثیر:</span>
+                      <div className="flex flex-wrap gap-1 max-w-[65%] justify-end">
+                        {targetedGitApps.length === 0 ? (
+                          <span className="text-rose-400 text-[10px] font-medium">هیچ سرویسی یافت نشد</span>
+                        ) : (
+                          targetedGitApps.slice(0, 3).map((a) => (
+                            <span key={a.id} className="px-1.5 py-0.5 bg-[#82aaff]/10 text-[#82aaff] border border-[#82aaff]/20 rounded text-[10px] font-mono">
+                              {a.name}
+                            </span>
+                          ))
+                        )}
+                        {targetedGitApps.length > 3 && (
+                          <span className="px-1 py-0.5 bg-[#1e2030] text-[#c0caf5] rounded text-[10px]">
+                            +{targetedGitApps.length - 3}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Git Authentication Card */}
+                    <div className={`space-y-3 p-3.5 rounded-xl border transition-all ${
+                      gitAuthRequired 
+                        ? "bg-amber-500/10 border-amber-500/40 shadow-[0_0_20px_rgba(245,158,11,0.15)]" 
+                        : "bg-[#0a101d]/40 border-[#82aaff]/20"
+                    }`}>
+                      <div className="flex items-center justify-between">
+                        <label className="text-[#c0caf5] font-bold text-[11px] flex items-center gap-1.5">
+                          <KeyRound className="w-3.5 h-3.5 text-cyan-400" />
+                          اطلاعات احراز هویت گیت (Git Credentials)
+                        </label>
+                        <span className="text-[10px] text-[#c0caf5]/50">(در صورت نیاز)</span>
+                      </div>
+
+                      {/* Username */}
+                      <div className="space-y-1">
+                        <div className="text-[10px] text-[#c0caf5]/70 flex items-center gap-1">
+                          <User className="w-3 h-3 text-[#82aaff]" />
+                          نام کاربری گیت (Username / Email):
+                        </div>
+                        <input
+                          type="text"
+                          value={gitUsername}
+                          onChange={(e) => setGitUsername(e.target.value)}
+                          placeholder="مثلاً: git-username یا developer@..."
+                          disabled={gitRunning}
+                          className="w-full bg-[#0a101d] border border-[#82aaff]/20 rounded-xl p-2.5 text-[#c0caf5] text-[12px] font-mono text-left focus:outline-none focus:border-[#82aaff]/60"
+                          dir="ltr"
+                          autoComplete="username"
+                        />
+                      </div>
+
+                      {/* Password / PAT */}
+                      <div className="space-y-1">
+                        <div className="text-[10px] text-[#c0caf5]/70 flex items-center justify-between">
+                          <span className="flex items-center gap-1">
+                            <Lock className="w-3 h-3 text-[#82aaff]" />
+                            رمز عبور یا Personal Access Token (PAT):
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => setShowGitPassword(!showGitPassword)}
+                            className="text-[10px] text-cyan-400 hover:text-cyan-300 flex items-center gap-1"
+                          >
+                            {showGitPassword ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
+                            {showGitPassword ? "مخفی‌سازی" : "نمایش"}
+                          </button>
+                        </div>
+                        <div className="relative">
+                          <input
+                            type={showGitPassword ? "text" : "password"}
+                            value={gitPassword}
+                            onChange={(e) => setGitPassword(e.target.value)}
+                            placeholder="ghp_... یا رمز عبور اکانت"
+                            disabled={gitRunning}
+                            className="w-full bg-[#0a101d] border border-[#82aaff]/20 rounded-xl p-2.5 text-[#c0caf5] text-[12px] font-mono text-left focus:outline-none focus:border-[#82aaff]/60"
+                            dir="ltr"
+                            autoComplete="current-password"
+                          />
+                        </div>
+                      </div>
+
+                      {/* Additional Git Options: Branch & Save */}
+                      <div className="grid grid-cols-2 gap-2 pt-1">
+                        <div className="space-y-1">
+                          <span className="text-[10px] text-[#c0caf5]/70">شاخه (Branch):</span>
+                          <input
+                            type="text"
+                            value={gitBranch}
+                            onChange={(e) => setGitBranch(e.target.value)}
+                            placeholder="main یا master..."
+                            disabled={gitRunning}
+                            className="w-full bg-[#0a101d] border border-[#82aaff]/20 rounded-xl p-2 text-[#c0caf5] text-[11px] font-mono text-left focus:outline-none focus:border-[#82aaff]/60"
+                            dir="ltr"
+                          />
+                        </div>
+                        <div className="flex items-center pt-4">
+                          <label className="flex items-center gap-2 cursor-pointer select-none text-[11px] text-[#c0caf5]/80 hover:text-[#c0caf5]">
+                            <input
+                              type="checkbox"
+                              checked={gitRememberCreds}
+                              onChange={(e) => setGitRememberCreds(e.target.checked)}
+                              className="rounded border-[#82aaff]/30 bg-[#0a101d] text-[#82aaff] focus:ring-0"
+                            />
+                            ذخیره اطلاعات در مرورگر
+                          </label>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Operational Toggles */}
+                    <div className="grid grid-cols-3 gap-2 pt-1">
+                      <label className="flex items-center gap-1.5 cursor-pointer text-[10px] text-[#c0caf5]/75 hover:text-[#c0caf5] select-none">
+                        <input
+                          type="checkbox"
+                          checked={gitForceClean}
+                          onChange={(e) => setGitForceClean(e.target.checked)}
+                          disabled={gitRunning}
+                          className="rounded border-[#82aaff]/30 bg-[#0a101d] text-[#82aaff]"
+                        />
+                        پاک‌سازی HEAD
+                      </label>
+                      <label className="flex items-center gap-1.5 cursor-pointer text-[10px] text-[#c0caf5]/75 hover:text-[#c0caf5] select-none">
+                        <input
+                          type="checkbox"
+                          checked={gitAutoInstall}
+                          onChange={(e) => setGitAutoInstall(e.target.checked)}
+                          disabled={gitRunning}
+                          className="rounded border-[#82aaff]/30 bg-[#0a101d] text-[#82aaff]"
+                        />
+                        نصب npm
+                      </label>
+                      <label className="flex items-center gap-1.5 cursor-pointer text-[10px] text-[#c0caf5]/75 hover:text-[#c0caf5] select-none">
+                        <input
+                          type="checkbox"
+                          checked={gitAutoBuild}
+                          onChange={(e) => setGitAutoBuild(e.target.checked)}
+                          disabled={gitRunning}
+                          className="rounded border-[#82aaff]/30 bg-[#0a101d] text-[#82aaff]"
+                        />
+                        بیلد فرانت‌اند
+                      </label>
+                    </div>
+
+                    {/* Submit Button */}
+                    <div className="pt-2">
+                      <button
+                        onClick={runGitUpdate}
+                        disabled={gitRunning || targetedGitApps.length === 0}
+                        className={`w-full py-3.5 px-4 rounded-xl text-[13px] font-bold transition-all flex items-center justify-center gap-2 shadow-lg ${
+                          gitRunning
+                            ? "bg-amber-500/20 text-amber-300 border border-amber-500/30 cursor-not-allowed"
+                            : gitAuthRequired
+                            ? "bg-amber-500 hover:bg-amber-400 text-[#1a1b26] shadow-amber-500/20"
+                            : "bg-[#82aaff] hover:bg-[#9bb8ff] text-[#1a1b26] shadow-[#82aaff]/20 active:scale-[0.99]"
+                        } disabled:opacity-50 disabled:cursor-not-allowed`}
+                      >
+                        {gitRunning ? (
+                          <>
+                            <RefreshCw className="w-4 h-4 animate-spin" />
+                            در حال اجرای فرآیند بروزرسانی... ({gitProgress}%)
+                          </>
+                        ) : gitAuthRequired ? (
+                          <>
+                            <KeyRound className="w-4 h-4" />
+                            احراز هویت و تلاش مجدد بروزرسانی
+                          </>
+                        ) : (
+                          <>
+                            <GitBranch className="w-4 h-4" />
+                            شروع همگام‌سازی و بروزرسانی ({targetedGitApps.length} سرویس)
+                          </>
+                        )}
+                      </button>
+                    </div>
+
+                    {/* Progress Bar */}
+                    <div>
+                      <div className="flex justify-between text-[10px] text-[#c0caf5]/60 mb-1.5 font-mono" dir="ltr">
+                        <span>Status: {gitRunning ? "Updating..." : gitProgress === 100 ? "Done" : "Idle"}</span>
                         <span>{gitProgress}%</span>
                       </div>
-                      <div className="h-1.5 w-full bg-[#0a101d]/80 rounded-full overflow-hidden border border-[#82aaff]/10">
+                      <div className="h-2 w-full bg-[#0a101d]/90 rounded-full overflow-hidden border border-[#82aaff]/15">
                         <motion.div 
-                          className="h-full bg-[#82aaff] shadow-[0_0_10px_rgba(130,170,255,0.5)]"
+                          className={`h-full ${
+                            gitAuthRequired 
+                              ? "bg-amber-500 shadow-[0_0_10px_rgba(245,158,11,0.5)]" 
+                              : "bg-gradient-to-r from-[#82aaff] to-cyan-400 shadow-[0_0_10px_rgba(130,170,255,0.5)]"
+                          }`}
                           initial={{ width: 0 }}
                           animate={{ width: `${gitProgress}%` }}
                           transition={{ duration: 0.3 }}
@@ -1578,35 +2036,129 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Pane 2: Git Logs Terminal (Left side) */}
-                <div className="bg-[#050b14]/60 backdrop-blur-2xl border border-[#82aaff]/30 rounded-2xl overflow-hidden flex flex-col h-full shadow-[0_0_30px_rgba(130,170,255,0.05)] relative group" dir="rtl">
+                {/* Pane 2: Live Terminal Console (7 cols) */}
+                <div className="lg:col-span-7 bg-[#050b14]/70 backdrop-blur-2xl border border-[#82aaff]/30 rounded-2xl overflow-hidden flex flex-col shadow-[0_0_30px_rgba(130,170,255,0.05)] relative group" dir="rtl">
                   <div className="absolute inset-0 bg-gradient-to-br from-emerald-500/5 to-transparent pointer-events-none" />
                   
-                  {/* Top Bar */}
-                  <div className="flex justify-between items-center pt-3 px-3 h-12 border-b border-[#82aaff]/10">
-                    <div className="flex items-stretch h-6 filter drop-shadow-md shrink-0">
-                      <div className="bg-emerald-500 text-[#1a1b26] flex items-center px-4 font-bold rounded-r-sm z-10 text-[11px]">
-                        ترمینال وضعیت بروزرسانی
+                  {/* Terminal Header */}
+                  <div className="flex items-center justify-between px-4 h-12 border-b border-[#82aaff]/10 bg-[#080e1a]/80 shrink-0">
+                    <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-1.5 pl-2 border-l border-[#82aaff]/20">
+                        <div className="w-3 h-3 rounded-full bg-rose-500/80" />
+                        <div className="w-3 h-3 rounded-full bg-amber-500/80" />
+                        <div className="w-3 h-3 rounded-full bg-emerald-500/80" />
                       </div>
-                      <div className="w-0 h-0 border-y-[12px] border-y-transparent border-r-[12px] border-r-emerald-500 relative z-20"></div>
+                      <div className="flex items-center gap-1.5 text-xs font-mono font-bold text-emerald-400 mr-2">
+                        <Terminal className="w-4 h-4" />
+                        <span>Live Terminal Output</span>
+                        {gitRunning && (
+                          <span className="inline-block w-2 h-2 rounded-full bg-emerald-400 animate-ping ml-1" />
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Terminal Actions */}
+                    <div className="flex items-center gap-2" dir="ltr">
+                      <button
+                        type="button"
+                        onClick={() => setGitAutoScroll(!gitAutoScroll)}
+                        className={`px-2.5 py-1 rounded-md text-[10px] font-mono border transition-all ${
+                          gitAutoScroll 
+                            ? "bg-emerald-500/10 text-emerald-300 border-emerald-500/30 font-bold" 
+                            : "bg-[#1e2030]/50 text-[#c0caf5]/60 border-[#82aaff]/15"
+                        }`}
+                        title="Auto-scroll to latest logs"
+                      >
+                        Auto-scroll: {gitAutoScroll ? "ON" : "OFF"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={copyGitLogs}
+                        disabled={gitLogs.length === 0}
+                        className="p-1.5 rounded-md bg-[#1e2030]/50 hover:bg-[#82aaff]/20 text-[#c0caf5] border border-[#82aaff]/15 transition-colors disabled:opacity-30 flex items-center gap-1 text-[11px]"
+                        title="Copy logs"
+                      >
+                        {gitCopied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={clearGitTerminal}
+                        disabled={gitLogs.length === 0 || gitRunning}
+                        className="p-1.5 rounded-md bg-[#1e2030]/50 hover:bg-rose-500/20 text-[#c0caf5] hover:text-rose-300 border border-[#82aaff]/15 transition-colors disabled:opacity-30"
+                        title="Clear terminal"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
                     </div>
                   </div>
 
-                  {/* Terminal Content */}
-                  <div className="flex-1 p-6 font-mono text-[11px] overflow-y-auto space-y-1 z-10 selection:bg-emerald-500 selection:text-black" dir="ltr">
+                  {/* Terminal Log Screen */}
+                  <div 
+                    className="flex-1 p-4 font-mono text-[11.5px] overflow-y-auto space-y-1 z-10 selection:bg-emerald-500 selection:text-black min-h-[420px] max-h-[600px] bg-[#02060d]/80" 
+                    dir="ltr"
+                  >
                     {gitLogs.length === 0 ? (
-                      <div className="text-[#c0caf5]/50 flex items-center gap-2">
-                        <span className="text-[#82aaff] font-bold">~</span> Waiting for command...
+                      <div className="h-full flex flex-col items-center justify-center text-[#c0caf5]/40 text-center py-20 space-y-2 select-none">
+                        <FolderGit2 className="w-10 h-10 text-[#82aaff]/30 stroke-[1.5]" />
+                        <div className="font-mono text-xs text-[#c0caf5]/60">آماده دریافت فرمان‌های بروزرسانی مخزن</div>
+                        <div className="text-[10px] text-[#c0caf5]/40 max-w-sm">
+                          برای شروع، فیلتر یا سرویس مورد نظر را انتخاب کرده و روی «شروع همگام‌سازی» کلیک کنید. لاگ‌ها به صورت زنده خط به خط در این ترمینال نمایش داده خواهند شد.
+                        </div>
                       </div>
                     ) : (
-                      gitLogs.map((log, idx) => (
-                        <div key={idx} className="flex items-start gap-2 text-[#c0caf5]/80 hover:text-[#c0caf5] hover:bg-[#1e2030]/30 px-1 py-0.5 rounded transition-colors break-words whitespace-pre-wrap">
-                          <span className="text-emerald-400 font-bold shrink-0">&gt;</span>
-                          <span className="flex-1">{log}</span>
-                        </div>
-                      ))
+                      gitLogs.map((log, idx) => {
+                        const isCmd = log.includes("[CMD]");
+                        const isStdout = log.includes("[STDOUT]");
+                        const isStderr = log.includes("[STDERR]");
+                        const isError = log.includes("[ERROR]") || log.includes("[FATAL]") || log.includes("[SPAWN_ERROR]");
+                        const isSuccess = log.includes("[SUCCESS]") || log.includes("آخرین کامیت:");
+                        const isAuth = log.includes("[AUTH]") || log.includes("احراز هویت");
+                        const isProcess = log.includes("[PROCESS]") || log.includes("▶ شروع");
+
+                        let textClass = "text-[#c0caf5]/80";
+                        let prefixClass = "text-[#82aaff]";
+
+                        if (isAuth) {
+                          textClass = "text-amber-200 font-bold bg-amber-500/10 px-1.5 py-0.5 rounded border-l-2 border-amber-400";
+                          prefixClass = "text-amber-400";
+                        } else if (isError) {
+                          textClass = "text-rose-300 font-medium bg-rose-500/10 px-1.5 py-0.5 rounded border-l-2 border-rose-500";
+                          prefixClass = "text-rose-400";
+                        } else if (isSuccess) {
+                          textClass = "text-emerald-300 font-medium bg-emerald-500/5 px-1.5 py-0.5 rounded";
+                          prefixClass = "text-emerald-400";
+                        } else if (isCmd) {
+                          textClass = "text-cyan-300 font-bold";
+                          prefixClass = "text-cyan-400";
+                        } else if (isStderr) {
+                          textClass = "text-amber-300/90";
+                          prefixClass = "text-amber-400";
+                        } else if (isProcess) {
+                          textClass = "text-[#82aaff] font-bold";
+                          prefixClass = "text-[#82aaff]";
+                        }
+
+                        return (
+                          <div 
+                            key={idx} 
+                            className={`flex items-start gap-2 hover:bg-[#1e2030]/30 px-1 rounded transition-colors break-words whitespace-pre-wrap leading-relaxed ${textClass}`}
+                          >
+                            <span className={`shrink-0 font-bold select-none ${prefixClass}`}>&gt;</span>
+                            <span className="flex-1">{log}</span>
+                          </div>
+                        );
+                      })
                     )}
                     <div ref={gitLogsEndRef} />
+                  </div>
+
+                  {/* Terminal Footer Info */}
+                  <div className="px-4 py-2 bg-[#080e1a]/90 border-t border-[#82aaff]/10 flex items-center justify-between text-[10px] font-mono text-[#c0caf5]/60 shrink-0" dir="ltr">
+                    <span>Lines: {gitLogs.length}</span>
+                    <span className="flex items-center gap-1.5">
+                      <span className={`w-1.5 h-1.5 rounded-full ${gitRunning ? "bg-amber-400 animate-ping" : "bg-emerald-400"}`} />
+                      Git Terminal: {gitRunning ? "STREAMING" : "READY"}
+                    </span>
                   </div>
                 </div>
               </div>

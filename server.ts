@@ -106,6 +106,7 @@ const appStates = new Map<string, AppRuntimeState>();
 let gitUpdateLogs: string[] = [];
 let gitUpdateRunning = false;
 let gitUpdateProgress = 0;
+let gitAuthRequired = false;
 let lastScanTime = 0;
 
 // System Hardware & HTOP Telemetry
@@ -1446,166 +1447,376 @@ async function startServer() {
     }
   });
 
-  // API: Git Batch Updater
+  // Helper: Run command with live line-by-line output streaming
+  function streamProcess(
+    cmd: string,
+    args: string[],
+    cwd: string,
+    env: NodeJS.ProcessEnv,
+    onLine: (line: string, type: "cmd" | "stdout" | "stderr" | "error" | "info" | "success") => void,
+    timeoutMs = 180000
+  ): Promise<{ code: number; stdout: string; stderr: string }> {
+    return new Promise((resolve) => {
+      // Safely mask any passwords from displayed command line
+      const displayArgs = args.map((arg) => {
+        if (arg.includes("password=")) {
+          return arg.replace(/password=([^;"'\s]+)/g, "password=******");
+        }
+        return arg;
+      });
+
+      onLine(`$ ${cmd} ${displayArgs.join(" ")}`, "cmd");
+
+      let stdoutAcc = "";
+      let stderrAcc = "";
+      let stdoutBuffer = "";
+      let stderrBuffer = "";
+
+      let child: ChildProcess;
+      try {
+        child = spawn(cmd, args, {
+          cwd,
+          env,
+          stdio: ["ignore", "pipe", "pipe"]
+        });
+      } catch (err: any) {
+        onLine(`[SPAWN_ERROR] Failed to start ${cmd}: ${err.message}`, "error");
+        resolve({ code: 1, stdout: "", stderr: err.message });
+        return;
+      }
+
+      if (child.stdout) {
+        child.stdout.on("data", (chunk: Buffer) => {
+          const text = chunk.toString("utf-8");
+          stdoutAcc += text;
+          stdoutBuffer += text;
+          const lines = stdoutBuffer.split(/\r?\n/);
+          stdoutBuffer = lines.pop() || "";
+          for (const line of lines) {
+            if (line.trim()) onLine(line, "stdout");
+          }
+        });
+      }
+
+      if (child.stderr) {
+        child.stderr.on("data", (chunk: Buffer) => {
+          const text = chunk.toString("utf-8");
+          stderrAcc += text;
+          stderrBuffer += text;
+          const lines = stderrBuffer.split(/\r?\n/);
+          stderrBuffer = lines.pop() || "";
+          for (const line of lines) {
+            if (line.trim()) onLine(line, "stderr");
+          }
+        });
+      }
+
+      const timer = setTimeout(() => {
+        onLine(`[TIMEOUT] Process ${cmd} exceeded timeout limit (${Math.round(timeoutMs / 1000)}s). Terminating...`, "error");
+        try {
+          child.kill("SIGKILL");
+        } catch (e) {}
+        resolve({ code: -1, stdout: stdoutAcc, stderr: stderrAcc + "\nProcess timed out" });
+      }, timeoutMs);
+
+      child.on("close", (code) => {
+        clearTimeout(timer);
+        if (stdoutBuffer.trim()) onLine(stdoutBuffer, "stdout");
+        if (stderrBuffer.trim()) onLine(stderrBuffer, "stderr");
+        resolve({ code: code ?? 0, stdout: stdoutAcc, stderr: stderrAcc });
+      });
+
+      child.on("error", (err) => {
+        clearTimeout(timer);
+        onLine(`[ERROR] Process error: ${err.message}`, "error");
+        resolve({ code: 1, stdout: stdoutAcc, stderr: stderrAcc + `\n${err.message}` });
+      });
+    });
+  }
+
+  // API: Git Batch Updater with Authentication & Live Terminal Streaming
   app.post("/api/apps/git-update", (req, res) => {
-    const { keyword } = req.body;
-    const filterKeyword = keyword || "";
+    const { 
+      targetType = "all", 
+      targetValue = "", 
+      keyword = "", 
+      username = "", 
+      password = "", 
+      branch = "", 
+      gitUrl = "",
+      forceClean = true,
+      autoInstall = true,
+      autoBuild = true
+    } = req.body;
 
     if (gitUpdateRunning) {
-      res.status(400).json({ error: "Another Git update process is currently running." });
+      res.status(400).json({ error: "یک فرآیند بروزرسانی گیت در حال اجراست. لطفاً تا پایان آن منتظر بمانید." });
       return;
     }
 
-    gitUpdateLogs = [`[${new Date().toISOString()}] [INFO] Starting Git Batch Update with filter: "${filterKeyword}"`];
+    const pushGitLog = (text: string, type: "cmd" | "stdout" | "stderr" | "error" | "info" | "success" | "auth" = "info") => {
+      const now = new Date();
+      const timeStr = now.toLocaleTimeString("fa-IR", { hour12: false });
+      const tag = type.toUpperCase();
+      gitUpdateLogs.push(`[${timeStr}] [${tag}] ${text}`);
+      if (gitUpdateLogs.length > 1000) {
+        gitUpdateLogs.shift();
+      }
+    };
+
+    gitUpdateLogs = [];
+    gitAuthRequired = false;
     gitUpdateRunning = true;
     gitUpdateProgress = 5;
 
-    // Start background processing
-    res.json({ status: "success", message: "Git batch updater started successfully in background." });
+    pushGitLog(`شروع فرآیند واکشی و به‌روزرسانی گیت (Target: ${targetType}${targetValue ? ` - ${targetValue}` : ""})`, "info");
+    if (username) {
+      pushGitLog(`احراز هویت گیت با نام کاربری: ${username} فعال شد.`, "info");
+    }
 
-    // Background runner sequence
+    res.json({ status: "success", message: "فرآیند همگام‌سازی و بروزرسانی گیت آغاز گردید." });
+
     (async () => {
       try {
         const appsDir = path.resolve(process.cwd(), "apps");
         if (!fs.existsSync(appsDir)) {
-          gitUpdateLogs.push(`[${new Date().toISOString()}] [ERROR] Apps folder not found.`);
-          gitUpdateRunning = false;
-          return;
+          try {
+            fs.mkdirSync(appsDir, { recursive: true });
+          } catch (e) {}
         }
 
+        // Re-scan directory to ensure newest state
+        scanAppsDirectory();
+
+        // Detect matching applications based on target criteria
         const matchingApps: AppRuntimeState[] = [];
-        const keywordLower = filterKeyword.toLowerCase();
+        const tVal = (targetValue || keyword || "").trim().toLowerCase();
 
         appStates.forEach((state) => {
-          const nameMatches = state.config.name.toLowerCase().includes(keywordLower);
-          const idMatches = state.config.id.toLowerCase().includes(keywordLower);
-          
-          let groupMatches = false;
-          if (state.config.groups && Array.isArray(state.config.groups)) {
-            groupMatches = state.config.groups.some(g => g.toLowerCase().includes(keywordLower));
-          }
-
-          if (nameMatches || idMatches || groupMatches || filterKeyword === "") {
+          if (targetType === "all") {
             matchingApps.push(state);
+          } else if (targetType === "group") {
+            const hasGroup = state.config.groups && Array.isArray(state.config.groups) &&
+              state.config.groups.some(g => g.toLowerCase() === tVal || g.toLowerCase().includes(tVal));
+            if (hasGroup) matchingApps.push(state);
+          } else if (targetType === "service") {
+            const isId = state.config.id.toLowerCase() === tVal;
+            const isName = state.config.name.toLowerCase() === tVal || state.config.name.toLowerCase().includes(tVal);
+            const isPath = state.config.path.toLowerCase().includes(tVal);
+            if (isId || isName || isPath) matchingApps.push(state);
+          } else {
+            // Fallback keyword search
+            const nameMatches = state.config.name.toLowerCase().includes(tVal);
+            const idMatches = state.config.id.toLowerCase().includes(tVal);
+            const groupMatches = state.config.groups && state.config.groups.some(g => g.toLowerCase().includes(tVal));
+            if (nameMatches || idMatches || groupMatches || tVal === "") {
+              matchingApps.push(state);
+            }
           }
         });
 
         if (matchingApps.length === 0) {
-          gitUpdateLogs.push(`[${new Date().toISOString()}] [WARNING] No configured applications matching keyword "${keyword}" were found.`);
+          pushGitLog(`هیچ سرویس فعالی مطابق با فیلتر مشخص شده (${targetType}: ${tVal || "خالی"}) یافت نشد.`, "error");
+          pushGitLog(`راهنما: بررسی کنید که پوشه سرویس در مسیر apps/ موجود باشد یا نام و گروه آن درست انتخاب شده باشد.`, "info");
           gitUpdateProgress = 100;
           gitUpdateRunning = false;
           return;
         }
 
-        gitUpdateLogs.push(`[${new Date().toISOString()}] [INFO] Found ${matchingApps.length} matching applications to update.`);
-        
+        pushGitLog(`تعداد ${matchingApps.length} سرویس جهت همگام‌سازی شناسایی شد: [${matchingApps.map(a => a.config.name).join(", ")}]`, "info");
+
+        // Prepare Git authentication parameters
+        const gitBaseArgs: string[] = [];
+        const gitEnv: NodeJS.ProcessEnv = {
+          ...process.env,
+          GIT_TERMINAL_PROMPT: "0",
+          GIT_ASKPASS: "echo",
+          LC_ALL: "C"
+        };
+
+        if (username && password) {
+          const safeUser = username.replace(/"/g, '\\"');
+          const safePass = password.replace(/"/g, '\\"');
+          gitBaseArgs.push(
+            "-c",
+            `credential.helper=!f() { echo "username=${safeUser}"; echo "password=${safePass}"; }; f`,
+            "-c",
+            "credential.useHttpPath=true"
+          );
+        }
+
+        const isAuthError = (text: string) => {
+          return /Authentication failed|could not read Username|could not read Password|Permission denied|terminal prompts disabled|Invalid credentials|HTTP 401|HTTP 403/i.test(text);
+        };
+
         const stepWeight = 90 / matchingApps.length;
 
         for (let i = 0; i < matchingApps.length; i++) {
           const appState = matchingApps[i];
           const fullAppPath = path.resolve(process.cwd(), appState.config.path);
-          gitUpdateLogs.push(`----------------------------------------`);
-          gitUpdateLogs.push(`[${new Date().toISOString()}] [PROCESS] Updating application: ${appState.config.name} (${appState.config.id})`);
           
-          try {
-            // 1. Git Reset Hard
-            gitUpdateLogs.push(`[${new Date().toISOString()}] [CMD] git reset --hard HEAD`);
-            await new Promise<void>((resolve, reject) => {
-              exec("git reset --hard HEAD", { cwd: fullAppPath, timeout: 60000 }, (err, stdout, stderr) => {
-                if (err) {
-                  gitUpdateLogs.push(`[${new Date().toISOString()}] [STDERR] ${stderr}`);
-                  reject(new Error(`Git reset failed: ${err.message}`));
-                  return;
+          if (!fs.existsSync(fullAppPath)) {
+            try {
+              fs.mkdirSync(fullAppPath, { recursive: true });
+            } catch (e) {}
+          }
+
+          pushGitLog(`────────────────────────────────────────────────────────`, "info");
+          pushGitLog(`▶ شروع بروزرسانی سرویس: ${appState.config.name} (شناسه: ${appState.config.id})`, "info");
+          pushGitLog(`مسیر سرویس در سرور: ${appState.config.path}`, "info");
+
+          const gitDir = path.join(fullAppPath, ".git");
+          const isGitRepo = fs.existsSync(gitDir);
+
+          let updateSucceeded = true;
+
+          if (!isGitRepo) {
+            const remoteRepoUrl = gitUrl || (appState.config as any).gitUrl;
+            if (remoteRepoUrl) {
+              pushGitLog(`پوشه فاقد ریپازیتوری گیت است. در حال اجرای git clone از ${remoteRepoUrl}...`, "info");
+              const cloneArgs = [...gitBaseArgs, "clone", remoteRepoUrl, "."];
+              const cloneRes = await streamProcess("git", cloneArgs, fullAppPath, gitEnv, (l, t) => pushGitLog(l, t));
+              
+              if (cloneRes.code !== 0) {
+                updateSucceeded = false;
+                if (isAuthError(cloneRes.stderr + cloneRes.stdout)) {
+                  gitAuthRequired = true;
+                  pushGitLog(`⚠️ خطا در احراز هویت گیت: دسترسی به مخزن به دلیل فقدان یا اشتباه بودن نام کاربری/توکن رد شد.`, "auth");
+                  pushGitLog(`👉 لطفاً نام کاربری و Personal Access Token (PAT) را وارد کرده و دوباره دکمه بروزرسانی را بزنید.`, "auth");
+                } else {
+                  pushGitLog(`❌ کلون کردن مخزن با خطا مواجه شد (کد خروجی: ${cloneRes.code})`, "error");
                 }
-                gitUpdateLogs.push(`[${new Date().toISOString()}] [STDOUT] ${stdout.trim()}`);
-                resolve();
-              });
-            });
+              }
+            } else {
+              pushGitLog(`⚠️ توجه: پوشه این سرویس مخزن گیت (.git) ندارد و آدرس مخزن ریموت ست نشده است.`, "info");
+              pushGitLog(`ℹ️ مراحل گیت نادیده گرفته شد؛ بیلد و راه‌اندازی با کدهای موجود ادامه می‌یابد.`, "info");
+            }
+          } else {
+            // Existing Git repository
+            if (gitUrl) {
+              pushGitLog(`تنظیم آدرس ریموت origin به: ${gitUrl}`, "info");
+              await streamProcess("git", ["remote", "set-url", "origin", gitUrl], fullAppPath, gitEnv, (l, t) => pushGitLog(l, t));
+            }
+
+            // 1. Reset & Clean working tree
+            if (forceClean) {
+              pushGitLog(`پاک‌سازی فایل‌های موقت و بازگردانی وضعیت HEAD (git reset & clean)...`, "info");
+              await streamProcess("git", ["reset", "--hard", "HEAD"], fullAppPath, gitEnv, (l, t) => pushGitLog(l, t));
+              await streamProcess("git", ["clean", "-fd"], fullAppPath, gitEnv, (l, t) => pushGitLog(l, t));
+            }
 
             // 2. Git Fetch
-            gitUpdateLogs.push(`[${new Date().toISOString()}] [CMD] git fetch --all`);
-            await new Promise<void>((resolve, reject) => {
-              exec("git fetch --all", { cwd: fullAppPath, timeout: 60000 }, (err, stdout, stderr) => {
-                if (err) {
-                  gitUpdateLogs.push(`[${new Date().toISOString()}] [STDERR] ${stderr}`);
-                  reject(new Error(`Git fetch failed: ${err.message}`));
-                  return;
-                }
-                if (stdout) gitUpdateLogs.push(`[${new Date().toISOString()}] [STDOUT] ${stdout.trim()}`);
-                resolve();
-              });
-            });
+            pushGitLog(`در حال واکشی آخرین تغییرات از مخزن ریموت (git fetch)...`, "info");
+            const fetchArgs = [...gitBaseArgs, "fetch", "--all", "--prune"];
+            const fetchRes = await streamProcess("git", fetchArgs, fullAppPath, gitEnv, (l, t) => pushGitLog(l, t));
 
-            // 3. Git Pull
-            gitUpdateLogs.push(`[${new Date().toISOString()}] [CMD] git pull`);
-            await new Promise<void>((resolve, reject) => {
-              exec("git pull", { cwd: fullAppPath, timeout: 60000 }, (err, stdout, stderr) => {
-                if (err) {
-                  gitUpdateLogs.push(`[${new Date().toISOString()}] [STDERR] ${stderr}`);
-                  reject(new Error(`Git pull failed: ${err.message}`));
-                  return;
-                }
-                gitUpdateLogs.push(`[${new Date().toISOString()}] [STDOUT] ${stdout.trim()}`);
-                resolve();
-              });
-            });
-          } catch (gitErr: any) {
-            gitUpdateLogs.push(`[${new Date().toISOString()}] [ERROR] Update failed for ${appState.config.name}: ${gitErr.message}`);
-            gitUpdateLogs.push(`[${new Date().toISOString()}] [INFO] Skipping build/restart for this app due to git error.`);
-            gitUpdateProgress = Math.min(95, Math.round(5 + (i + 1) * stepWeight));
-            continue; // Skip build/restart and move to the next app
-          }
+            if (fetchRes.code !== 0) {
+              updateSucceeded = false;
+              if (isAuthError(fetchRes.stderr + fetchRes.stdout)) {
+                gitAuthRequired = true;
+                pushGitLog(`⚠️ [خطای احراز هویت]: مخزن نیازمند نام کاربری و رمز عبور یا Personal Access Token (PAT) است.`, "auth");
+                pushGitLog(`👉 فیلدهای احراز هویت گیت را در پنل بالا تکمیل کرده و مجدداً بروزرسانی کنید.`, "auth");
+              } else {
+                pushGitLog(`❌ خطا در اجرای git fetch (کد: ${fetchRes.code})`, "error");
+              }
+            }
 
-          // 4. Build if frontend or restart if backend
-          if (appState.config.type === "frontend") {
-            gitUpdateLogs.push(`[${new Date().toISOString()}] [CMD] npm run build`);
-            appState.status = "BUILDING";
-            
-            await new Promise<void>((resolve) => {
-              // run build script of that app
-              exec("npm run build", { cwd: fullAppPath }, (err, stdout, stderr) => {
-                if (err) {
-                  gitUpdateLogs.push(`[${new Date().toISOString()}] [STDERR] Build failed: ${err.message}`);
+            // 3. Checkout Branch & Git Pull if fetch succeeded
+            if (updateSucceeded) {
+              const targetBranch = branch || (appState.config as any).gitBranch;
+              if (targetBranch) {
+                pushGitLog(`سوئیچ به شاخه ${targetBranch}...`, "info");
+                await streamProcess("git", ["checkout", targetBranch], fullAppPath, gitEnv, (l, t) => pushGitLog(l, t));
+              }
+
+              pushGitLog(`در حال دریافت و اعمال تغییرات (git pull)...`, "info");
+              const pullArgs = [...gitBaseArgs, "pull"];
+              if (targetBranch) {
+                pullArgs.push("origin", targetBranch);
+              }
+
+              const pullRes = await streamProcess("git", pullArgs, fullAppPath, gitEnv, (l, t) => pushGitLog(l, t));
+              if (pullRes.code !== 0) {
+                updateSucceeded = false;
+                if (isAuthError(pullRes.stderr + pullRes.stdout)) {
+                  gitAuthRequired = true;
+                  pushGitLog(`⚠️ خطای احراز هویت حین اجرای git pull.`, "auth");
                 } else {
-                  gitUpdateLogs.push(`[${new Date().toISOString()}] [STDOUT] Client build compiled successfully inside dist/ folder.`);
+                  pushGitLog(`❌ خطا در اجرای git pull: ${pullRes.stderr || pullRes.stdout}`, "error");
                 }
-                resolve();
-              });
-            });
-
-            // Re-serve client static server
-            gitUpdateLogs.push(`[${new Date().toISOString()}] [INFO] Reloading static web server assets...`);
-            restartApp(appState.config.id);
-
-          } else {
-            // Backend: Restart process
-            gitUpdateLogs.push(`[${new Date().toISOString()}] [INFO] Restarting backend microservice process...`);
-            restartApp(appState.config.id);
-            gitUpdateLogs.push(`[${new Date().toISOString()}] [SUCCESS] Backend service restarted successfully.`);
+              } else {
+                // Show latest commit summary
+                await streamProcess("git", ["log", "-1", "--pretty=format:آخرین کامیت: %h - %s (%cr)"], fullAppPath, gitEnv, (l) => pushGitLog(l, "success"));
+              }
+            }
           }
+
+          // If git failed due to authentication or fatal error, skip build for this app
+          if (!updateSucceeded) {
+            pushGitLog(`⏭️ رد شدن از بیلد و ری‌استارت ${appState.config.name} به دلیل خطای گیت.`, "error");
+            gitUpdateProgress = Math.min(95, Math.round(5 + (i + 1) * stepWeight));
+            continue;
+          }
+
+          // 4. Install npm dependencies if package.json exists
+          const pkgPath = path.join(fullAppPath, "package.json");
+          if (fs.existsSync(pkgPath) && autoInstall) {
+            pushGitLog(`در حال بررسی و نصب وابستگی‌های پکیج (npm install)...`, "info");
+            await streamProcess("npm", ["install", "--prefer-offline", "--no-audit"], fullAppPath, gitEnv, (l, t) => pushGitLog(l, t), 180000);
+          }
+
+          // 5. Build if frontend or custom build script exists
+          if (appState.config.type === "frontend" && autoBuild) {
+            pushGitLog(`در حال کامپایل و بیلد فرانت‌اند (npm run build)...`, "info");
+            appState.status = "BUILDING";
+            const buildRes = await streamProcess("npm", ["run", "build"], fullAppPath, gitEnv, (l, t) => pushGitLog(l, t), 180000);
+            if (buildRes.code === 0) {
+              pushGitLog(`بیلد فرانت‌اند با موفقیت تولید شد.`, "success");
+            } else {
+              pushGitLog(`⚠️ خطایی حین بیلد فرانت‌اند رخ داد، در حال تلاش برای فعال‌سازی سرور استاتیک...`, "error");
+            }
+          }
+
+          // 6. Restart App
+          pushGitLog(`در حال راه‌اندازی مجدد و اعمال نسخه جدید سرویس ${appState.config.name}...`, "info");
+          restartApp(appState.config.id);
+          pushGitLog(`✅ سرویس ${appState.config.name} با موفقیت ری‌استارت شد.`, "success");
 
           gitUpdateProgress = Math.min(95, Math.round(5 + (i + 1) * stepWeight));
         }
 
-        gitUpdateLogs.push(`----------------------------------------`);
-        gitUpdateLogs.push(`[${new Date().toISOString()}] [SUCCESS] Git Batch Update completed successfully!`);
+        pushGitLog(`────────────────────────────────────────────────────────`, "info");
+        if (gitAuthRequired) {
+          pushGitLog(`⚠️ فرآیند پایان یافت اما یک یا چند سرویس نیازمند وارد کردن نام کاربری و توکن/رمز گیت بودند.`, "auth");
+        } else {
+          pushGitLog(`🎉 عملیات بروزرسانی گیت با موفقیت کامل انجام شد! تمام سرویس‌ها بروز و فعال هستند.`, "success");
+        }
         gitUpdateProgress = 100;
         gitUpdateRunning = false;
 
       } catch (err: any) {
-        gitUpdateLogs.push(`[${new Date().toISOString()}] [FATAL] Git Updater process aborted: ${err.message}`);
+        pushGitLog(`[FATAL] خطای پیش‌بینی نشده در فرآیند بروزرسانی: ${err.message}`, "error");
+        gitUpdateProgress = 100;
         gitUpdateRunning = false;
       }
     })();
   });
 
-  // API: Get Git Update Logs
+  // API: Get Git Update Logs and status
   app.get("/api/apps/git-update/logs", (req, res) => {
     res.json({
       logs: gitUpdateLogs,
       running: gitUpdateRunning,
-      progress: gitUpdateProgress
+      progress: gitUpdateProgress,
+      authRequired: gitAuthRequired
     });
+  });
+
+  // API: Clear Git Update Logs
+  app.post("/api/apps/git-update/clear", (req, res) => {
+    gitUpdateLogs = [];
+    gitAuthRequired = false;
+    res.json({ success: true });
   });
 
   // API: AI Log Trouble-shooting / Gemini Diagnosis
