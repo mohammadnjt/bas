@@ -3,6 +3,7 @@ import path from "path";
 import fs from "fs";
 import os from "os";
 import { exec, spawn, ChildProcess } from "child_process";
+import crypto from "crypto";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, ThinkingLevel } from "@google/genai";
 import dns from "dns";
@@ -16,6 +17,22 @@ dotenv.config();
 // Fix DNS resolution priority for localhost in older Node environments
 dns.setDefaultResultOrder("ipv4first");
 
+// Set by the esbuild production build (see package.json), so `npm start` never serves the Vite dev server
+declare const BAS_PRODUCTION_BUILD: boolean | undefined;
+const isProduction = process.env.NODE_ENV === "production" || (typeof BAS_PRODUCTION_BUILD !== "undefined" && BAS_PRODUCTION_BUILD);
+
+// BAS's own settings and secrets, which must not reach managed apps, npm scripts or git
+const BAS_PRIVATE_ENV_KEYS = ["ADMIN_USERNAME", "ADMIN_PASSWORD", "GEMINI_API_KEY", "SMS_API_URL", "SMS_APIKEY_BAS", "ALLOWED_IPS", "UNAUTHORIZED_REDIRECT_URL"];
+
+// Environment for child processes: BAS's environment minus its private keys and BAS_* settings
+function childEnv(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  Object.keys(env).forEach((key) => {
+    if (BAS_PRIVATE_ENV_KEYS.includes(key) || key.startsWith("BAS_")) delete env[key];
+  });
+  return { ...env, ...extra };
+}
+
 // Security state
 export interface AccessLog {
   ip: string;
@@ -25,23 +42,50 @@ export interface AccessLog {
 }
 const accessLogs: AccessLog[] = [];
 const bannedIPs = new Map<string, number>();
-const failedAttempts = new Map<string, number>();
+// Failed sign-ins per IP, forgotten after a day without failures. `keys` holds recently rejected API keys,
+// so a stale key repeated by an old open tab counts once instead of banning the admin's own IP.
+const failedAttempts = new Map<string, { count: number; lastAt: number; keys: string[] }>();
+const FAILED_ATTEMPT_WINDOW_MS = 24 * 60 * 60 * 1000;
+let lastSecuritySmsAt = 0;
 
 function logAccess(ip: string, action: string, success: boolean) {
   accessLogs.unshift({ ip, timestamp: new Date().toISOString(), action, success });
   if (accessLogs.length > 200) accessLogs.pop();
 }
 
-function handleFailedAttempt(ip: string) {
-  const count = (failedAttempts.get(ip) || 0) + 1;
-  failedAttempts.set(ip, count);
+function handleFailedAttempt(ip: string, rejectedKey?: string) {
+  const now = Date.now();
+  if (failedAttempts.size > 10000) {
+    failedAttempts.forEach((entry, key) => {
+      if (now - entry.lastAt > FAILED_ATTEMPT_WINDOW_MS) failedAttempts.delete(key);
+    });
+    bannedIPs.forEach((expiry, key) => {
+      if (now > expiry) bannedIPs.delete(key);
+    });
+  }
+
+  const previous = failedAttempts.get(ip);
+  const entry: { count: number; lastAt: number; keys: string[] } =
+    previous && now - previous.lastAt < FAILED_ATTEMPT_WINDOW_MS ? previous : { count: 0, lastAt: now, keys: [] };
+  if (rejectedKey) {
+    const keyHash = sha256(rejectedKey);
+    if (entry.keys.includes(keyHash)) return;
+    entry.keys = [...entry.keys.slice(-9), keyHash];
+  }
+  entry.count += 1;
+  entry.lastAt = now;
+  failedAttempts.set(ip, entry);
+  const count = entry.count;
   logAccess(ip, `Failed Auth (Count: ${count})`, false);
   
   if (count >= 5 && !bannedIPs.has(ip)) {
-    bannedIPs.set(ip, Date.now() + 24 * 60 * 60 * 1000); // 24 hours ban
+    bannedIPs.set(ip, now + 24 * 60 * 60 * 1000); // 24 hours ban
     logAccess(ip, "IP BANNED (5+ Failed Attempts)", false);
-    // Send SMS alert
-    triggerSMSAlert("SECURITY", "ATCK" + String(ip).replace(/[^0-9]/g, "").substring(0, 5));
+    // At most one SMS per 15 minutes, so attempts from many addresses can't flood the admin's phone
+    if (now - lastSecuritySmsAt > 15 * 60 * 1000) {
+      lastSecuritySmsAt = now;
+      triggerSMSAlert("SECURITY", "ATCK" + String(ip).replace(/[^0-9]/g, "").substring(0, 5));
+    }
   }
 }
 
@@ -57,6 +101,8 @@ interface AppConfig {
   groups?: string[];
   alertEnabled?: boolean;
   alertThreshold?: number;
+  gitUrl?: string;
+  gitBranch?: string;
 }
 
 interface SMSGatewayConfig {
@@ -93,6 +139,7 @@ interface AppRuntimeState {
   lastCrashTime: string | null;
   childProcess: ChildProcess | null;
   staticServer: any | null; // express/http server instance for frontends
+  servingRoot?: string | null; // set during an update's build: serve this copy of the previous build instead
 }
 
 // Global Orchestrator State
@@ -107,6 +154,10 @@ let gitUpdateLogs: string[] = [];
 let gitUpdateRunning = false;
 let gitUpdateProgress = 0;
 let gitAuthRequired = false;
+// Per-deployment files: every copy of a repository (e.g. one per customer) keeps its own version of these
+const INSTANCE_FILES = ["bas.config.json", ".env"];
+// npm install / build can take far longer than git on small servers
+const NPM_STEP_TIMEOUT_MS = 15 * 60 * 1000;
 let lastScanTime = 0;
 
 // System Hardware & HTOP Telemetry
@@ -358,11 +409,10 @@ function startApp(id: string) {
     try {
       const child = spawn("node", [state.config.entry], {
         cwd: appPath,
-        env: {
-          ...process.env,
+        env: childEnv({
           NODE_PATH: absoluteNodeModules,
           PORT: state.config.port.toString()
-        }
+        })
       });
 
       state.childProcess = child;
@@ -449,9 +499,10 @@ function startApp(id: string) {
 
     try {
       const fApp = express();
-      fApp.use(express.static(buildPath));
+      const serveBuild = express.static(buildPath);
+      fApp.use((req, res, next) => (state.servingRoot ? express.static(state.servingRoot) : serveBuild)(req, res, next));
       fApp.get("*", (req, res) => {
-        res.sendFile(path.join(buildPath, "index.html"));
+        res.sendFile(path.join(state.servingRoot || buildPath, "index.html"));
       });
 
       const fServer = fApp.listen(state.config.port, "0.0.0.0", () => {
@@ -569,6 +620,55 @@ function simulateAppCrash(id: string): boolean {
   return true;
 }
 
+// Read an app folder's package.json and bas.config.json
+function readAppManifest(fullPath: string, dir: string): { pkgData: any; basConfig: any } {
+  // Read package.json if it exists
+  const pkgPath = path.join(fullPath, "package.json");
+  let pkgData: any = {};
+  if (fs.existsSync(pkgPath)) {
+    try {
+      pkgData = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
+    } catch (e) {
+      console.error(`[BAS] Error parsing package.json for ${dir}:`, e);
+    }
+  }
+
+  // Read bas.config.json
+  const basConfigPath = path.join(fullPath, "bas.config.json");
+  let basConfig: any = {};
+  if (fs.existsSync(basConfigPath)) {
+    try {
+      const rawConfig = JSON.parse(fs.readFileSync(basConfigPath, "utf-8"));
+      // If they just renamed their package.json, the config is under .orchestrator
+      basConfig = rawConfig.orchestrator || rawConfig;
+    } catch (e) {
+      console.error(`[BAS] Error parsing bas.config.json for ${dir}:`, e);
+    }
+  } else {
+    // Fallback for backwards compatibility
+    basConfig = pkgData.orchestrator || {};
+  }
+
+  return { pkgData, basConfig };
+}
+
+function createAppState(appConfig: AppConfig): AppRuntimeState {
+  return {
+    config: appConfig,
+    status: "STOPPED",
+    pid: null,
+    restarts: 0,
+    crashCount: 0,
+    cpu: 0,
+    memory: 0,
+    uptime: 0,
+    logs: [],
+    lastCrashTime: null,
+    childProcess: null,
+    staticServer: null
+  };
+}
+
 // Automatically scan apps directory and sync with config with throttling to protect performance
 function scanAppsDirectory(force = false) {
   const now = Date.now();
@@ -587,55 +687,43 @@ function scanAppsDirectory(force = false) {
     }
   }
 
-  const subdirs = fs.readdirSync(appsDir);
+  const appDirs = fs.readdirSync(appsDir).filter((dir) => {
+    try {
+      return fs.statSync(path.join(appsDir, dir)).isDirectory();
+    } catch (e) {
+      return false;
+    }
+  });
+  const manifests = new Map(appDirs.map((dir) => [dir, readAppManifest(path.join(appsDir, dir), dir)] as const));
   let configChanged = false;
+
+  // Several folders can be deployments of the same repository (e.g. one per customer) and so share the same
+  // package.json name. Count the candidate ids so those folders fall back to their unique folder name instead.
+  const idCounts = new Map<string, number>();
+  manifests.forEach(({ pkgData, basConfig }, dir) => {
+    const candidate = basConfig.id || pkgData.name || dir;
+    idCounts.set(candidate, (idCounts.get(candidate) || 0) + 1);
+  });
 
   // Track directories currently existing under apps/
   const existingAppPaths = new Set<string>();
 
-  subdirs.forEach((dir) => {
+  appDirs.forEach((dir) => {
     const fullPath = path.join(appsDir, dir);
-    let isDir = false;
-    try {
-      isDir = fs.statSync(fullPath).isDirectory();
-    } catch (e) {
-      return;
-    }
-    if (!isDir) return;
-
     const relativePath = path.join("apps", dir);
     existingAppPaths.add(relativePath);
 
-    // Read package.json if it exists
-    const pkgPath = path.join(fullPath, "package.json");
-    let pkgData: any = {};
-    if (fs.existsSync(pkgPath)) {
-      try {
-        pkgData = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
-      } catch (e) {
-        console.error(`[BAS] Error parsing package.json for ${dir}:`, e);
-      }
-    }
-
-    // Read bas.config.json
-    const basConfigPath = path.join(fullPath, "bas.config.json");
-    let basConfig: any = {};
-    if (fs.existsSync(basConfigPath)) {
-      try {
-        const rawConfig = JSON.parse(fs.readFileSync(basConfigPath, "utf-8"));
-        // If they just renamed their package.json, the config is under .orchestrator
-        basConfig = rawConfig.orchestrator || rawConfig;
-      } catch (e) {
-        console.error(`[BAS] Error parsing bas.config.json for ${dir}:`, e);
-      }
-    } else {
-      // Fallback for backwards compatibility
-      basConfig = pkgData.orchestrator || {};
-    }
+    const { pkgData, basConfig } = manifests.get(dir)!;
 
     const pkgName = pkgData.name || dir;
 
-    const id = basConfig.id || pkgName;
+    let id = basConfig.id || pkgName;
+    if ((idCounts.get(id) || 0) > 1) {
+      if (basConfig.id) {
+        console.warn(`[BAS] Duplicate id "${id}" in ${relativePath}/bas.config.json, using folder name "${dir}" instead.`);
+      }
+      id = dir;
+    }
     const name = basConfig.name || pkgData.description || dir;
     const version = pkgData.version || "1.0.0";
     
@@ -681,6 +769,8 @@ function scanAppsDirectory(force = false) {
     }
 
     const autoStart = basConfig.autoStart !== undefined ? basConfig.autoStart : true;
+    const gitUrl: string | undefined = basConfig.gitUrl || undefined;
+    const gitBranch: string | undefined = basConfig.gitBranch || undefined;
 
     // Check if app is already registered in config
     let existingApp = config.apps.find((app) => app.path === relativePath);
@@ -706,7 +796,9 @@ function scanAppsDirectory(force = false) {
         entry,
         port,
         autoStart,
-        groups
+        groups,
+        gitUrl,
+        gitBranch
       };
 
       config.apps.push(newApp);
@@ -715,20 +807,7 @@ function scanAppsDirectory(force = false) {
 
       // Register in state map
       if (!appStates.has(id)) {
-        appStates.set(id, {
-          config: newApp,
-          status: "STOPPED",
-          pid: null,
-          restarts: 0,
-          crashCount: 0,
-          cpu: 0,
-          memory: 0,
-          uptime: 0,
-          logs: [],
-          lastCrashTime: null,
-          childProcess: null,
-          staticServer: null
-        });
+        appStates.set(id, createAppState(newApp));
 
         if (newApp.autoStart) {
           // Delay start slightly to prevent process racing on initial boot
@@ -779,10 +858,21 @@ function scanAppsDirectory(force = false) {
         existingApp.groups = groups;
         changed = true;
       }
+      if (existingApp.gitUrl !== gitUrl || existingApp.gitBranch !== gitBranch) {
+        existingApp.gitUrl = gitUrl;
+        existingApp.gitBranch = gitBranch;
+        changed = true;
+      }
 
       const state = appStates.get(id);
       if (state) {
         state.config = { ...existingApp };
+      } else {
+        // Happens when folders that previously shared one id (same package.json name) are given their own ids
+        appStates.set(id, createAppState({ ...existingApp }));
+        if (existingApp.autoStart) {
+          setTimeout(() => startApp(id), 100);
+        }
       }
 
       if (changed) {
@@ -810,6 +900,8 @@ function scanAppsDirectory(force = false) {
 
 // Automatically scan all sub-apps' package.json files, merge missing dependencies into root package.json and run npm install
 function autoSyncDependencies() {
+  // BAS_AUTO_SYNC_DEPENDENCIES=false: don't install the apps' dependencies into BAS's own folder on start
+  if (process.env.BAS_AUTO_SYNC_DEPENDENCIES === "false") return;
   const appsDir = path.resolve(process.cwd(), "apps");
   if (!fs.existsSync(appsDir)) return;
 
@@ -855,7 +947,7 @@ function autoSyncDependencies() {
       console.log("[Orchestrator Sync] Root package.json updated with new sub-app dependencies. Triggering npm install...");
       
       // Execute npm install asynchronously in the background so it doesn't block the Orchestrator startup
-      exec("npm install", (err, stdout, stderr) => {
+      exec("npm install", { env: childEnv() }, (err, stdout, stderr) => {
         if (err) {
           console.error(`[Orchestrator Sync] npm install failed: ${err.message}`);
           return;
@@ -876,20 +968,7 @@ function initOrchestrator() {
 
   // Populate state maps with loaded configuration first
   config.apps.forEach((app) => {
-    appStates.set(app.id, {
-      config: app,
-      status: "STOPPED",
-      pid: null,
-      restarts: 0,
-          crashCount: 0,
-      cpu: 0,
-      memory: 0,
-      uptime: 0,
-      logs: [],
-      lastCrashTime: null,
-      childProcess: null,
-      staticServer: null
-    });
+    appStates.set(app.id, createAppState(app));
   });
 
   // Scan physical directory to discover new apps / remove deleted ones
@@ -1021,10 +1100,110 @@ function resolveAdminCredentials(): { username?: string; password?: string } {
   }
 
   if (!password || password === "none" || password === "false") {
-    password = "admin"; // Default password if none provided, ensuring it is never completely open
+    password = undefined; // never fall back to a default password; see ensureAdminPassword()
   }
 
   return { username, password };
+}
+
+// The panel must never run with a default password: on a start without ADMIN_PASSWORD, generate one into .env
+function ensureAdminPassword() {
+  if (resolveAdminCredentials().password) return;
+
+  const envPath = path.resolve(process.cwd(), ".env");
+  const line = `ADMIN_PASSWORD=${crypto.randomBytes(18).toString("base64url")}`;
+  try {
+    const content = fs.existsSync(envPath) ? fs.readFileSync(envPath, "utf-8") : "";
+    const updated = /^ADMIN_PASSWORD\s*=.*$/m.test(content)
+      ? content.replace(/^ADMIN_PASSWORD\s*=.*$/m, line)
+      : `${content}${content && !content.endsWith("\n") ? "\n" : ""}${line}\n`;
+    fs.writeFileSync(envPath, updated, { encoding: "utf-8", mode: 0o600 });
+    console.warn(`[Security] ADMIN_PASSWORD was not set. A random password was generated and saved as ADMIN_PASSWORD in ${envPath}`);
+  } catch (e: any) {
+    console.error(`[Security] ADMIN_PASSWORD is not set and could not be written to ${envPath} (${e.message}). The panel stays locked until it is set.`);
+  }
+}
+
+function sha256(value: string): string {
+  return crypto.createHash("sha256").update(value).digest("hex");
+}
+
+// Constant-time string comparison
+function safeEqual(a: string, b: string): boolean {
+  return crypto.timingSafeEqual(Buffer.from(sha256(a)), Buffer.from(sha256(b)));
+}
+
+// Admin sessions: a random token in an HttpOnly cookie, kept in memory (a BAS restart signs everyone out)
+const SESSION_COOKIE = "bas_session";
+const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const sessions = new Map<string, { credKey: string; expiresAt: number }>();
+
+function createSession(credKey: string): string {
+  const now = Date.now();
+  sessions.forEach((session, token) => {
+    if (session.expiresAt < now) sessions.delete(token);
+  });
+  const token = crypto.randomBytes(32).toString("hex");
+  sessions.set(token, { credKey, expiresAt: now + SESSION_TTL_MS });
+  return token;
+}
+
+// A session ends when it expires or when the admin username/password changes
+function isValidSession(token: string | null, credKey: string): boolean {
+  const session = token ? sessions.get(token) : undefined;
+  return !!session && session.expiresAt > Date.now() && session.credKey === credKey;
+}
+
+// BAS_TRUST_PROXY: which proxies may report the client address via X-Forwarded-For (express "trust proxy").
+// The default only trusts a proxy on this machine, so a client connecting directly can't fake its address.
+function parseTrustProxy(value: string | undefined): boolean | number | string {
+  if (!value) return "loopback";
+  if (value === "true" || value === "false") return value === "true";
+  if (/^\d+$/.test(value)) return Number(value);
+  return value;
+}
+
+function normalizeIp(ip: string): string {
+  return ip.startsWith("::ffff:") ? ip.slice(7) : ip;
+}
+
+// Blocks state-changing requests that a browser sends on behalf of another site (CSRF)
+function isCrossSiteRequest(req: express.Request): boolean {
+  if (["GET", "HEAD", "OPTIONS"].includes(req.method)) return false;
+  const fetchSite = req.headers["sec-fetch-site"];
+  if (fetchSite) return fetchSite !== "same-origin" && fetchSite !== "none";
+  // Older browsers: compare Origin with the host the panel is served on; no Origin means not a browser
+  const origin = req.headers.origin;
+  if (!origin) return false;
+  try {
+    return new URL(origin).host !== (req.headers["x-forwarded-host"] || req.headers.host);
+  } catch (e) {
+    return true;
+  }
+}
+
+// The built panel's server bundle is written next to its assets in dist/ and must not be downloadable
+const SERVER_BUNDLE_PATHS = ["/server.cjs", "/server.cjs.map"];
+
+// What the login screen needs before a session exists. In development Vite serves the whole project
+// folder (apps/, config.json, sources), so only the panel's own modules and public files are public.
+const PUBLIC_PAGE_PATHS = ["/", "/index.html", "/docs", "/docs.html"];
+const DEV_PUBLIC_PREFIXES = ["/src/", "/@vite/", "/@react-refresh", "/@id/", "/node_modules/", "/@vite-plugin-pwa/"];
+let devPublicFiles: Set<string> | null = null;
+
+function isPublicAsset(urlPath: string): boolean {
+  if (PUBLIC_PAGE_PATHS.includes(urlPath)) return true;
+  if (SERVER_BUNDLE_PATHS.includes(urlPath)) return false;
+  // Production serves only the built panel from dist/
+  if (isProduction) return true;
+  if (DEV_PUBLIC_PREFIXES.some((prefix) => urlPath.startsWith(prefix))) return true;
+  if (!devPublicFiles) {
+    devPublicFiles = new Set(["/manifest.webmanifest", "/registerSW.js", "/dev-sw.js"]);
+    try {
+      fs.readdirSync(path.resolve(process.cwd(), "public")).forEach((file) => devPublicFiles!.add(`/${file}`));
+    } catch (e) {}
+  }
+  return devPublicFiles.has(urlPath);
 }
 
 // Simple cookie parser helper
@@ -1034,20 +1213,49 @@ function getCookie(cookieHeader: string | undefined, name: string): string | nul
   for (let i = 0; i < cookies.length; i++) {
     const cookie = cookies[i].trim();
     if (cookie.startsWith(name + "=")) {
-      return cookie.substring(name.length + 1);
+      try {
+        return decodeURIComponent(cookie.substring(name.length + 1));
+      } catch (e) {
+        return null;
+      }
     }
   }
   return null;
 }
 
+// Mask credentials in log lines before they leave the server (AI diagnosis)
+function redactSecrets(text: string): string {
+  return text
+    .replace(/(\/\/)[^\s/:@]+:[^\s/@]+@/g, "$1[REDACTED]@")
+    .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+\/=-]+/gi, "$1 [REDACTED]")
+    .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, "[REDACTED_JWT]")
+    .replace(/((?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key)["']?\s*[:=]\s*["']?)[^\s"',;&]+/gi, "$1[REDACTED]");
+}
+
 // Run full-stack Server
 async function startServer() {
   const app = express();
-  // Trust the reverse proxy (e.g., Cloud Run, Nginx, AI Studio) to securely read X-Forwarded-For headers for rate-limiting
-  app.set("trust proxy", 1);
+  // Client addresses come from req.ip; see parseTrustProxy() for which proxies are believed
+  app.set("trust proxy", parseTrustProxy(process.env.BAS_TRUST_PROXY));
   const PORT = resolveServerPort();
+  ensureAdminPassword();
 
-  app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false, crossOriginResourcePolicy: false })); // disabled CSP/COEP for external CDNs (Tailwind, Fonts)
+  app.use(helmet({
+    // Production only: Vite's dev server injects inline scripts and styles
+    contentSecurityPolicy: isProduction ? {
+      useDefaults: true,
+      directives: {
+        "style-src": ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+        "font-src": ["'self'", "data:", "https://fonts.gstatic.com"],
+        "img-src": ["'self'", "data:", "blob:"],
+        "frame-ancestors": ["'self'"],
+        // The panel is often reached over plain http://ip:port; upgrading its requests would break it
+        "upgrade-insecure-requests": null
+      }
+    } : false,
+    crossOriginEmbedderPolicy: false,
+    crossOriginResourcePolicy: false
+  }));
   app.use(express.json());
 
   const apiLimiter = rateLimit({
@@ -1059,9 +1267,9 @@ async function startServer() {
   });
   app.use("/api/", apiLimiter);
 
-  // Security Middleware: Protect the panel with API_KEY if set, handle IPs
+  // Security Middleware: admin session or API key, banned IPs, IP whitelist, CSRF
   app.use((req, res, next) => {
-    const clientIP = (req.headers["x-forwarded-for"] as string)?.split(',')[0] || req.ip || req.socket.remoteAddress || "unknown";
+    const clientIP = normalizeIp(req.ip || req.socket.remoteAddress || "unknown");
     
     const banExpiry = bannedIPs.get(clientIP);
     if (banExpiry) {
@@ -1082,41 +1290,27 @@ async function startServer() {
     }
 
     const { username, password } = resolveAdminCredentials();
-    if (!password) {
-      return next();
+    if (!username || !password) {
+      // Fail closed: see ensureAdminPassword()
+      return res.status(503).json({ error: "ADMIN_PASSWORD is not configured on the server." });
     }
-
-    const expectedToken = Buffer.from(`${username}:${password}`).toString("base64");
-
-    // 1. Extract and check the cookie or auth header
-    const cookieVal = getCookie(req.headers.cookie, "orchestrator_session");
-    const headerVal = req.headers["x-api-key"] || req.headers["authorization"]?.replace("Bearer ", "");
-    
-    const isAuthenticated = (cookieVal === expectedToken) || (headerVal === expectedToken);
-
-    if (isAuthenticated) {
-      if (headerVal === expectedToken) {
-         failedAttempts.delete(clientIP);
-      }
-      return next();
-    }
+    const credKey = sha256(`${username}\n${password}`);
+    const sessionToken = getCookie(req.headers.cookie, SESSION_COOKIE);
 
     if (req.path === "/api/auth/login" && req.method === "POST") {
       const { username: reqUser, password: reqPass } = req.body || {};
-      
-      console.log(`[Auth Login] Attempted user: '${reqUser}', Attempted pass: '${reqPass}'`);
-      console.log(`[Auth Login] Expected user: '${username}', Expected pass: '${password}'`);
 
-      if (reqUser === username && reqPass === password) {
+      if (typeof reqUser === "string" && typeof reqPass === "string" && safeEqual(reqUser, username) && safeEqual(reqPass, password)) {
         failedAttempts.delete(clientIP);
         logAccess(clientIP, "Successful Login via UI", true);
-        res.cookie("orchestrator_session", expectedToken, {
+        res.cookie(SESSION_COOKIE, createSession(credKey), {
           path: "/",
-          maxAge: 2 * 60 * 60 * 1000, // 2 hours
-          sameSite: "none",
-          secure: true
+          maxAge: SESSION_TTL_MS,
+          httpOnly: true,
+          sameSite: "strict",
+          secure: req.secure
         });
-        return res.json({ success: true, token: expectedToken });
+        return res.json({ success: true });
       } else {
         handleFailedAttempt(clientIP);
         return res.status(401).json({ error: "Invalid credentials" });
@@ -1124,14 +1318,29 @@ async function startServer() {
     }
 
     if (req.path === "/api/auth/logout" && req.method === "POST") {
-      res.clearCookie("orchestrator_session", { path: "/", sameSite: "none", secure: true });
+      if (sessionToken) sessions.delete(sessionToken);
+      res.clearCookie(SESSION_COOKIE, { path: "/", httpOnly: true, sameSite: "strict", secure: req.secure });
       return res.json({ success: true });
     }
 
-    // 3. Unauthorized access
-    const hasAttemptedAuth = false; // Boolean(headerVal || cookieVal || req.path.startsWith("/api/"));
-    if (hasAttemptedAuth) {
-       handleFailedAttempt(clientIP);
+    // API key for scripts: base64("username:password") in x-api-key or an Authorization header
+    const headerKey = (req.headers["x-api-key"] as string | undefined) || req.headers["authorization"]?.replace(/^(Bearer|Basic) /, "");
+    const apiKeyValid = !!headerKey && safeEqual(headerKey, Buffer.from(`${username}:${password}`).toString("base64"));
+
+    if (apiKeyValid || isValidSession(sessionToken, credKey)) {
+      if (apiKeyValid) {
+        failedAttempts.delete(clientIP);
+      }
+      if (isCrossSiteRequest(req)) {
+        logAccess(clientIP, `Blocked cross-site ${req.method} ${req.path}`, false);
+        return res.status(403).json({ error: "Cross-site request blocked" });
+      }
+      return next();
+    }
+
+    // A wrong API key counts as a failed sign-in (an expired session cookie does not)
+    if (headerKey) {
+      handleFailedAttempt(clientIP, headerKey);
     }
 
     // For API requests, return 401 Unauthorized
@@ -1148,8 +1357,11 @@ async function startServer() {
       }
     }
 
-    // Let other sub-assets (Vite scripts, favicon, styling) load
-    next();
+    // Let the login screen and its assets load; nothing else is served without a session
+    if (isPublicAsset(req.path)) {
+      return next();
+    }
+    res.status(404).send("Not Found");
   });
 
   // Initialize Orchestrator core
@@ -1249,6 +1461,24 @@ async function startServer() {
     } else {
       res.status(404).json({ error: "IP not found in ban list" });
     }
+  });
+
+  // API: Get Git Update Logs and status
+  // (registered before the /api/apps/:id/... routes, otherwise "git-update" is taken as an app id)
+  app.get("/api/apps/git-update/logs", (req, res) => {
+    res.json({
+      logs: gitUpdateLogs,
+      running: gitUpdateRunning,
+      progress: gitUpdateProgress,
+      authRequired: gitAuthRequired
+    });
+  });
+
+  // API: Clear Git Update Logs
+  app.post("/api/apps/git-update/clear", (req, res) => {
+    gitUpdateLogs = [];
+    gitAuthRequired = false;
+    res.json({ success: true });
   });
 
   // API: Get Single App Details & Logs
@@ -1417,7 +1647,7 @@ async function startServer() {
         
         // Wait for npm install to complete
         await new Promise<void>((resolve, reject) => {
-          exec("npm install", (err, stdout, stderr) => {
+          exec("npm install", { env: childEnv() }, (err, stdout, stderr) => {
             if (err) {
               console.error(`[Orchestrator Merger] npm install failed: ${err.message}`);
               reject(new Error(`npm install execution failed: ${err.message}`));
@@ -1477,7 +1707,9 @@ async function startServer() {
         child = spawn(cmd, args, {
           cwd,
           env,
-          stdio: ["ignore", "pipe", "pipe"]
+          stdio: ["ignore", "pipe", "pipe"],
+          // Own process group, so a timeout also kills what the command started (e.g. vite under npm run build)
+          detached: process.platform !== "win32"
         });
       } catch (err: any) {
         onLine(`[SPAWN_ERROR] Failed to start ${cmd}: ${err.message}`, "error");
@@ -1514,7 +1746,11 @@ async function startServer() {
       const timer = setTimeout(() => {
         onLine(`[TIMEOUT] Process ${cmd} exceeded timeout limit (${Math.round(timeoutMs / 1000)}s). Terminating...`, "error");
         try {
-          child.kill("SIGKILL");
+          if (process.platform !== "win32" && child.pid) {
+            process.kill(-child.pid, "SIGKILL");
+          } else {
+            child.kill("SIGKILL");
+          }
         } catch (e) {}
         resolve({ code: -1, stdout: stdoutAcc, stderr: stderrAcc + "\nProcess timed out" });
       }, timeoutMs);
@@ -1544,6 +1780,7 @@ async function startServer() {
       password = "", 
       branch = "", 
       gitUrl = "",
+      appIds = [],
       forceClean = true,
       autoInstall = true,
       autoBuild = true
@@ -1592,8 +1829,13 @@ async function startServer() {
         const matchingApps: AppRuntimeState[] = [];
         const tVal = (targetValue || keyword || "").trim().toLowerCase();
 
+        const requestedIds: string[] = Array.isArray(appIds) ? appIds : [];
+
         appStates.forEach((state) => {
-          if (targetType === "all") {
+          if (requestedIds.length > 0) {
+            // Exactly the services shown in the panel's preview
+            if (requestedIds.includes(state.config.id)) matchingApps.push(state);
+          } else if (targetType === "all") {
             matchingApps.push(state);
           } else if (targetType === "group") {
             const hasGroup = state.config.groups && Array.isArray(state.config.groups) &&
@@ -1626,30 +1868,46 @@ async function startServer() {
         pushGitLog(`تعداد ${matchingApps.length} سرویس جهت همگام‌سازی شناسایی شد: [${matchingApps.map(a => a.config.name).join(", ")}]`, "info");
 
         // Prepare Git authentication parameters
-        const gitBaseArgs: string[] = [];
         const gitEnv: NodeJS.ProcessEnv = {
-          ...process.env,
+          ...childEnv(),
           GIT_TERMINAL_PROMPT: "0",
-          GIT_ASKPASS: "echo",
+          // Empty rather than "echo": git then fails with a clear error instead of sending the prompt text as credentials
+          GIT_ASKPASS: "",
           LC_ALL: "C"
         };
 
+        // Extra arguments for the commands that talk to the remote
+        const authArgs: string[] = [];
         if (username && password) {
-          const safeUser = username.replace(/"/g, '\\"');
-          const safePass = password.replace(/"/g, '\\"');
-          gitBaseArgs.push(
+          // Credentials reach the helper through env vars, so characters like $ " ` \ in the password are never
+          // interpreted by the shell. The empty helper entry drops system/global helpers, so a stale stored password
+          // can't take precedence and the panel's password is never written to ~/.git-credentials.
+          gitEnv.BAS_GIT_USERNAME = username;
+          gitEnv.BAS_GIT_PASSWORD = password;
+          authArgs.push(
             "-c",
-            `credential.helper=!f() { echo "username=${safeUser}"; echo "password=${safePass}"; }; f`,
+            "credential.helper=",
             "-c",
-            "credential.useHttpPath=true"
+            `credential.helper=!f() { test "$1" = get || exit 0; printf '%s\\n' "username=$BAS_GIT_USERNAME" "password=$BAS_GIT_PASSWORD"; }; f`
           );
         }
 
         const isAuthError = (text: string) => {
-          return /Authentication failed|could not read Username|could not read Password|Permission denied|terminal prompts disabled|Invalid credentials|HTTP 401|HTTP 403/i.test(text);
+          return /Authentication failed|could not read Username|could not read Password|terminal prompts disabled|Invalid username or password|HTTP Basic: Access denied|Invalid credentials|returned error: 40[13]|HTTP 40[13]|Permission denied \(publickey/i.test(text);
+        };
+
+        const reportGitFailure = (step: string, result: { code: number; stdout: string; stderr: string }) => {
+          if (isAuthError(result.stderr + result.stdout)) {
+            gitAuthRequired = true;
+            pushGitLog(`⚠️ [خطای احراز هویت]: مخزن نیازمند نام کاربری و رمز عبور یا Personal Access Token (PAT) است، یا مقدار وارد شده اشتباه است.`, "auth");
+            pushGitLog(`👉 فیلدهای احراز هویت گیت را در پنل بالا تکمیل کرده و مجدداً بروزرسانی کنید.`, "auth");
+          } else {
+            pushGitLog(`❌ خطا در اجرای ${step} (کد: ${result.code})`, "error");
+          }
         };
 
         const stepWeight = 90 / matchingApps.length;
+        const failedApps: string[] = [];
 
         for (let i = 0; i < matchingApps.length; i++) {
           const appState = matchingApps[i];
@@ -1665,129 +1923,187 @@ async function startServer() {
           pushGitLog(`▶ شروع بروزرسانی سرویس: ${appState.config.name} (شناسه: ${appState.config.id})`, "info");
           pushGitLog(`مسیر سرویس در سرور: ${appState.config.path}`, "info");
 
-          const gitDir = path.join(fullAppPath, ".git");
-          const isGitRepo = fs.existsSync(gitDir);
+          // safe.directory: BAS may run as a different OS user than the one who owns the app folder
+          const git = (args: string[], onLine: (line: string, type: "cmd" | "stdout" | "stderr" | "error" | "info" | "success") => void = pushGitLog) =>
+            streamProcess("git", ["-c", `safe.directory=${fullAppPath}`, ...args], fullAppPath, gitEnv, onLine);
+          const quiet = () => {};
+
+          const remoteRepoUrl = gitUrl || appState.config.gitUrl;
+          const isGitRepo = fs.existsSync(path.join(fullAppPath, ".git"));
 
           let updateSucceeded = true;
 
-          if (!isGitRepo) {
-            const remoteRepoUrl = gitUrl || (appState.config as any).gitUrl;
-            if (remoteRepoUrl) {
-              pushGitLog(`پوشه فاقد ریپازیتوری گیت است. در حال اجرای git clone از ${remoteRepoUrl}...`, "info");
-              const cloneArgs = [...gitBaseArgs, "clone", remoteRepoUrl, "."];
-              const cloneRes = await streamProcess("git", cloneArgs, fullAppPath, gitEnv, (l, t) => pushGitLog(l, t));
-              
-              if (cloneRes.code !== 0) {
-                updateSucceeded = false;
-                if (isAuthError(cloneRes.stderr + cloneRes.stdout)) {
-                  gitAuthRequired = true;
-                  pushGitLog(`⚠️ خطا در احراز هویت گیت: دسترسی به مخزن به دلیل فقدان یا اشتباه بودن نام کاربری/توکن رد شد.`, "auth");
-                  pushGitLog(`👉 لطفاً نام کاربری و Personal Access Token (PAT) را وارد کرده و دوباره دکمه بروزرسانی را بزنید.`, "auth");
-                } else {
-                  pushGitLog(`❌ کلون کردن مخزن با خطا مواجه شد (کد خروجی: ${cloneRes.code})`, "error");
-                }
-              }
-            } else {
-              pushGitLog(`⚠️ توجه: پوشه این سرویس مخزن گیت (.git) ندارد و آدرس مخزن ریموت ست نشده است.`, "info");
-              pushGitLog(`ℹ️ مراحل گیت نادیده گرفته شد؛ بیلد و راه‌اندازی با کدهای موجود ادامه می‌یابد.`, "info");
-            }
+          if (!isGitRepo && !remoteRepoUrl) {
+            pushGitLog(`⚠️ توجه: پوشه این سرویس مخزن گیت (.git) ندارد و آدرس مخزن ریموت ست نشده است.`, "info");
+            pushGitLog(`ℹ️ مراحل گیت نادیده گرفته شد؛ بیلد و راه‌اندازی با کدهای موجود ادامه می‌یابد.`, "info");
           } else {
-            // Existing Git repository
-            if (gitUrl) {
+            if (!isGitRepo) {
+              // init + fetch instead of clone, so it also works when the folder already holds bas.config.json or .env
+              pushGitLog(`پوشه فاقد ریپازیتوری گیت است. در حال ایجاد مخزن و اتصال به ${remoteRepoUrl}...`, "info");
+              await git(["init", "-q"]);
+              await git(["remote", "add", "origin", remoteRepoUrl]);
+            } else if (gitUrl) {
               pushGitLog(`تنظیم آدرس ریموت origin به: ${gitUrl}`, "info");
-              await streamProcess("git", ["remote", "set-url", "origin", gitUrl], fullAppPath, gitEnv, (l, t) => pushGitLog(l, t));
+              await git(["remote", "set-url", "origin", gitUrl]);
             }
 
-            // 1. Reset & Clean working tree
-            if (forceClean) {
-              pushGitLog(`پاک‌سازی فایل‌های موقت و بازگردانی وضعیت HEAD (git reset & clean)...`, "info");
-              await streamProcess("git", ["reset", "--hard", "HEAD"], fullAppPath, gitEnv, (l, t) => pushGitLog(l, t));
-              await streamProcess("git", ["clean", "-fd"], fullAppPath, gitEnv, (l, t) => pushGitLog(l, t));
-            }
-
-            // 2. Git Fetch
+            // 1. Git Fetch: the only step that talks to the remote, so credentials are needed only here
             pushGitLog(`در حال واکشی آخرین تغییرات از مخزن ریموت (git fetch)...`, "info");
-            const fetchArgs = [...gitBaseArgs, "fetch", "--all", "--prune"];
-            const fetchRes = await streamProcess("git", fetchArgs, fullAppPath, gitEnv, (l, t) => pushGitLog(l, t));
-
+            const fetchRes = await git([...authArgs, "fetch", "--prune", "origin"]);
             if (fetchRes.code !== 0) {
               updateSucceeded = false;
-              if (isAuthError(fetchRes.stderr + fetchRes.stdout)) {
-                gitAuthRequired = true;
-                pushGitLog(`⚠️ [خطای احراز هویت]: مخزن نیازمند نام کاربری و رمز عبور یا Personal Access Token (PAT) است.`, "auth");
-                pushGitLog(`👉 فیلدهای احراز هویت گیت را در پنل بالا تکمیل کرده و مجدداً بروزرسانی کنید.`, "auth");
-              } else {
-                pushGitLog(`❌ خطا در اجرای git fetch (کد: ${fetchRes.code})`, "error");
-              }
+              reportGitFailure("git fetch", fetchRes);
             }
 
-            // 3. Checkout Branch & Git Pull if fetch succeeded
+            // 2. Branch to deploy: panel > gitBranch in bas.config.json > current branch > remote's default branch
+            let targetBranch = branch || appState.config.gitBranch || "";
+            if (updateSucceeded && !targetBranch) {
+              const current = (await git(["symbolic-ref", "--short", "-q", "HEAD"], quiet)).stdout.trim();
+              if (current && (await git(["rev-parse", "--verify", "-q", `refs/remotes/origin/${current}`], quiet)).code === 0) {
+                targetBranch = current;
+              } else {
+                await git([...authArgs, "remote", "set-head", "origin", "--auto"], quiet);
+                targetBranch = (await git(["symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD"], quiet)).stdout.trim().replace(/^origin\//, "");
+              }
+            }
+            if (updateSucceeded && (!targetBranch || (await git(["rev-parse", "--verify", "-q", `refs/remotes/origin/${targetBranch}`], quiet)).code !== 0)) {
+              updateSucceeded = false;
+              pushGitLog(`❌ شاخه ${targetBranch || "(نامشخص)"} روی مخزن ریموت پیدا نشد. نام شاخه را در پنل یا در فیلد gitBranch فایل bas.config.json مشخص کنید.`, "error");
+            }
+
+            // 3. Move the working tree to origin/<branch> (no second network round-trip and no merge, unlike git pull)
             if (updateSucceeded) {
-              const targetBranch = branch || (appState.config as any).gitBranch;
-              if (targetBranch) {
-                pushGitLog(`سوئیچ به شاخه ${targetBranch}...`, "info");
-                await streamProcess("git", ["checkout", targetBranch], fullAppPath, gitEnv, (l, t) => pushGitLog(l, t));
-              }
-
-              pushGitLog(`در حال دریافت و اعمال تغییرات (git pull)...`, "info");
-              const pullArgs = [...gitBaseArgs, "pull"];
-              if (targetBranch) {
-                pullArgs.push("origin", targetBranch);
-              }
-
-              const pullRes = await streamProcess("git", pullArgs, fullAppPath, gitEnv, (l, t) => pushGitLog(l, t));
-              if (pullRes.code !== 0) {
-                updateSucceeded = false;
-                if (isAuthError(pullRes.stderr + pullRes.stdout)) {
-                  gitAuthRequired = true;
-                  pushGitLog(`⚠️ خطای احراز هویت حین اجرای git pull.`, "auth");
-                } else {
-                  pushGitLog(`❌ خطا در اجرای git pull: ${pullRes.stderr || pullRes.stdout}`, "error");
+              let applyRes: { code: number; stdout: string; stderr: string };
+              if (forceClean) {
+                pushGitLog(`همگام‌سازی کامل با origin/${targetBranch} و حذف تغییرات محلی فایل‌های گیت...`, "info");
+                // checkout -f discards local edits to tracked files but leaves untracked ones (uploads, .env, ...) alone.
+                // Per-deployment files edited locally are restored in case the repository itself tracks them.
+                const statusRes = await git(["status", "--porcelain", "--", ...INSTANCE_FILES], quiet);
+                const instanceFiles = statusRes.stdout.split("\n")
+                  .filter((line) => line.length > 3)
+                  .map((line) => path.join(fullAppPath, line.slice(3)))
+                  .filter((file) => fs.existsSync(file))
+                  .map((file) => ({ file, content: fs.readFileSync(file) }));
+                applyRes = await git(["checkout", "-f", "-B", targetBranch, `origin/${targetBranch}`]);
+                instanceFiles.forEach(({ file, content }) => fs.writeFileSync(file, content));
+              } else {
+                pushGitLog(`در حال اعمال تغییرات شاخه ${targetBranch} (fast-forward)...`, "info");
+                applyRes = await git(["checkout", targetBranch]);
+                if (applyRes.code === 0) {
+                  applyRes = await git(["merge", "--ff-only", `origin/${targetBranch}`]);
                 }
+              }
+
+              if (applyRes.code !== 0) {
+                updateSucceeded = false;
+                pushGitLog(`❌ اعمال تغییرات شاخه ${targetBranch} ناموفق بود (کد: ${applyRes.code})`, "error");
               } else {
                 // Show latest commit summary
-                await streamProcess("git", ["log", "-1", "--pretty=format:آخرین کامیت: %h - %s (%cr)"], fullAppPath, gitEnv, (l) => pushGitLog(l, "success"));
+                await git(["log", "-1", "--pretty=format:آخرین کامیت: %h - %s (%cr)"], (l) => pushGitLog(l, "success"));
               }
             }
           }
 
           // If git failed due to authentication or fatal error, skip build for this app
           if (!updateSucceeded) {
+            failedApps.push(appState.config.name);
             pushGitLog(`⏭️ رد شدن از بیلد و ری‌استارت ${appState.config.name} به دلیل خطای گیت.`, "error");
             gitUpdateProgress = Math.min(95, Math.round(5 + (i + 1) * stepWeight));
             continue;
           }
 
+          // npm runs package scripts, so it gets neither the git credentials nor BAS's own secrets
+          const npmEnv = childEnv();
+          const needsBuild = appState.config.type === "frontend" && autoBuild;
+          // A service whose dependencies or build failed keeps running its current version
+          let readyToRestart = true;
+
           // 4. Install npm dependencies if package.json exists
           const pkgPath = path.join(fullAppPath, "package.json");
           if (fs.existsSync(pkgPath) && autoInstall) {
             pushGitLog(`در حال بررسی و نصب وابستگی‌های پکیج (npm install)...`, "info");
-            await streamProcess("npm", ["install", "--prefer-offline", "--no-audit"], fullAppPath, gitEnv, (l, t) => pushGitLog(l, t), 180000);
+            // Build tools (vite, ...) are devDependencies, which npm skips when NODE_ENV=production
+            const installArgs = ["install", "--prefer-offline", "--no-audit", ...(needsBuild ? ["--include=dev"] : [])];
+            const installRes = await streamProcess("npm", installArgs, fullAppPath, npmEnv, pushGitLog, NPM_STEP_TIMEOUT_MS);
+            if (installRes.code !== 0) {
+              readyToRestart = false;
+              pushGitLog(`❌ نصب وابستگی‌ها ناموفق بود (کد: ${installRes.code})`, "error");
+            }
           }
 
-          // 5. Build if frontend or custom build script exists
-          if (appState.config.type === "frontend" && autoBuild) {
+          // 5. Build the frontend. Build tools empty the output folder first, so meanwhile the site is served from
+          // a copy of the previous build, and that copy is put back if the build fails or times out.
+          if (readyToRestart && needsBuild) {
+            const buildPath = path.resolve(fullAppPath, appState.config.entry);
+            const relBuildPath = path.relative(fullAppPath, buildPath);
+            const previousBuild = path.join(path.dirname(buildPath), `.${path.basename(buildPath)}.bas-previous`);
+            let hasPreviousBuild = false;
+            if (relBuildPath && !relBuildPath.startsWith("..") && !path.isAbsolute(relBuildPath) && fs.existsSync(buildPath)) {
+              try {
+                fs.rmSync(previousBuild, { recursive: true, force: true });
+                fs.cpSync(buildPath, previousBuild, { recursive: true });
+                appState.servingRoot = previousBuild;
+                hasPreviousBuild = true;
+              } catch (e: any) {
+                pushGitLog(`⚠️ تهیه نسخه پشتیبان از بیلد قبلی ممکن نشد (${e.message})؛ سایت تا پایان بیلد در دسترس نخواهد بود.`, "error");
+              }
+            }
+
             pushGitLog(`در حال کامپایل و بیلد فرانت‌اند (npm run build)...`, "info");
+            const statusBeforeBuild = appState.status;
             appState.status = "BUILDING";
-            const buildRes = await streamProcess("npm", ["run", "build"], fullAppPath, gitEnv, (l, t) => pushGitLog(l, t), 180000);
+            const buildRes = await streamProcess("npm", ["run", "build"], fullAppPath, npmEnv, pushGitLog, NPM_STEP_TIMEOUT_MS);
+            if (appState.status === "BUILDING") {
+              appState.status = statusBeforeBuild;
+            }
+
             if (buildRes.code === 0) {
+              appState.servingRoot = null;
+              try {
+                fs.rmSync(previousBuild, { recursive: true, force: true });
+              } catch (e) {}
               pushGitLog(`بیلد فرانت‌اند با موفقیت تولید شد.`, "success");
             } else {
-              pushGitLog(`⚠️ خطایی حین بیلد فرانت‌اند رخ داد، در حال تلاش برای فعال‌سازی سرور استاتیک...`, "error");
+              readyToRestart = false;
+              pushGitLog(`❌ بیلد فرانت‌اند ناموفق بود (کد: ${buildRes.code})`, "error");
+              if (hasPreviousBuild) {
+                try {
+                  fs.rmSync(buildPath, { recursive: true, force: true });
+                  fs.renameSync(previousBuild, buildPath);
+                  appState.servingRoot = null;
+                  pushGitLog(`بیلد قبلی بازگردانده شد و سایت با نسخه قبلی در دسترس است.`, "info");
+                } catch (e: any) {
+                  // Keep serving the copy rather than a broken output folder
+                  pushGitLog(`❌ بازگردانی بیلد قبلی ممکن نشد (${e.message})؛ سایت همچنان از ${previousBuild} سرو می‌شود.`, "error");
+                }
+              }
             }
           }
 
           // 6. Restart App
-          pushGitLog(`در حال راه‌اندازی مجدد و اعمال نسخه جدید سرویس ${appState.config.name}...`, "info");
-          restartApp(appState.config.id);
-          pushGitLog(`✅ سرویس ${appState.config.name} با موفقیت ری‌استارت شد.`, "success");
+          const servesSamePort = appState.config.type === "frontend" && appState.status === "RUNNING" &&
+            appState.staticServer?.address()?.port === appState.config.port;
+          if (readyToRestart && servesSamePort) {
+            // The static server reads the build folder on every request, so the new build is already live
+            pushGitLog(`✅ نسخه جدید ${appState.config.name} بدون نیاز به ری‌استارت در حال سرو شدن است.`, "success");
+          } else if (readyToRestart) {
+            pushGitLog(`در حال راه‌اندازی مجدد و اعمال نسخه جدید سرویس ${appState.config.name}...`, "info");
+            restartApp(appState.config.id);
+            pushGitLog(`✅ سرویس ${appState.config.name} با موفقیت ری‌استارت شد.`, "success");
+          } else {
+            failedApps.push(appState.config.name);
+            pushGitLog(`⏭️ سرویس ${appState.config.name} ری‌استارت نشد و با نسخه قبلی به کار ادامه می‌دهد. پس از رفع خطا دوباره بروزرسانی کنید.`, "error");
+          }
 
           gitUpdateProgress = Math.min(95, Math.round(5 + (i + 1) * stepWeight));
         }
 
         pushGitLog(`────────────────────────────────────────────────────────`, "info");
-        if (gitAuthRequired) {
-          pushGitLog(`⚠️ فرآیند پایان یافت اما یک یا چند سرویس نیازمند وارد کردن نام کاربری و توکن/رمز گیت بودند.`, "auth");
+        if (failedApps.length > 0) {
+          pushGitLog(`⚠️ فرآیند پایان یافت اما ${failedApps.length} سرویس بروز نشد: [${failedApps.join(", ")}]`, "error");
+          if (gitAuthRequired) {
+            pushGitLog(`⚠️ یک یا چند سرویس نیازمند وارد کردن نام کاربری و توکن/رمز گیت بودند.`, "auth");
+          }
         } else {
           pushGitLog(`🎉 عملیات بروزرسانی گیت با موفقیت کامل انجام شد! تمام سرویس‌ها بروز و فعال هستند.`, "success");
         }
@@ -1802,23 +2118,6 @@ async function startServer() {
     })();
   });
 
-  // API: Get Git Update Logs and status
-  app.get("/api/apps/git-update/logs", (req, res) => {
-    res.json({
-      logs: gitUpdateLogs,
-      running: gitUpdateRunning,
-      progress: gitUpdateProgress,
-      authRequired: gitAuthRequired
-    });
-  });
-
-  // API: Clear Git Update Logs
-  app.post("/api/apps/git-update/clear", (req, res) => {
-    gitUpdateLogs = [];
-    gitAuthRequired = false;
-    res.json({ success: true });
-  });
-
   // API: AI Log Trouble-shooting / Gemini Diagnosis
   app.post("/api/ai/diagnose", async (req, res) => {
     const { appId, logs } = req.body;
@@ -1829,7 +2128,7 @@ async function startServer() {
     }
 
     try {
-      const logsContext = logs.slice(-60).join("\n");
+      const logsContext = redactSecrets(logs.slice(-60).join("\n"));
       const prompt = `You are an expert Devops Architect and System SRE (Site Reliability Engineer). 
 Analyze the following runtime crash logs from the application process "${appId}". 
 Identify the root cause of the crash, explain it simply, and provide 3 clear, actionable steps to resolve this bug.
@@ -1911,16 +2210,16 @@ ${logsContext}
     res.json({ status: "success", app: newApp });
   });
 
-  // Serve documentation files
-  app.get("/docs.html", (req, res) => {
+  // Serve documentation files (static page that loads Tailwind and Lucide from CDNs)
+  const sendDocs = (req: express.Request, res: express.Response) => {
+    res.removeHeader("Content-Security-Policy");
     res.sendFile(path.join(process.cwd(), "docs.html"));
-  });
-  app.get("/docs", (req, res) => {
-    res.sendFile(path.join(process.cwd(), "docs.html"));
-  });
+  };
+  app.get("/docs.html", sendDocs);
+  app.get("/docs", sendDocs);
 
   // Vite development or production webserver setup
-  if (process.env.NODE_ENV !== "production") {
+  if (!isProduction) {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
@@ -1928,14 +2227,17 @@ ${logsContext}
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), "dist");
+    app.use((req, res, next) => (SERVER_BUNDLE_PATHS.includes(req.path) ? res.status(404).send("Not Found") : next()));
     app.use(express.static(distPath));
     app.get("*", (req, res) => {
       res.sendFile(path.join(distPath, "index.html"));
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`[Orchestrator Web Panel] Server actively running on http://localhost:${PORT}`);
+  // BAS_HOST=127.0.0.1 keeps the panel reachable only through a local reverse proxy (e.g. nginx with TLS)
+  const HOST = process.env.BAS_HOST || "0.0.0.0";
+  app.listen(PORT, HOST, () => {
+    console.log(`[Orchestrator Web Panel] Server actively running on http://${HOST === "0.0.0.0" ? "localhost" : HOST}:${PORT}`);
   });
 }
 

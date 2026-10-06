@@ -680,6 +680,41 @@
                     عملیات‌های گروهی.
                   </td>
                 </tr>
+                <tr>
+                  <td class="py-3 px-4 font-mono text-emerald-400 font-bold">
+                    id
+                  </td>
+                  <td class="py-3 px-4 text-zinc-500">string</td>
+                  <td class="py-3 px-4 text-zinc-600">name در package.json</td>
+                  <td class="py-3 px-4">
+                    شناسه یکتای سرویس. اگر چند پوشه package.json هم‌نام داشته
+                    باشند (مثلاً نسخه‌های یک پروژه برای مشتری‌های مختلف)، نام
+                    پوشه به عنوان شناسه استفاده می‌شود.
+                  </td>
+                </tr>
+                <tr>
+                  <td class="py-3 px-4 font-mono text-emerald-400 font-bold">
+                    gitUrl
+                  </td>
+                  <td class="py-3 px-4 text-zinc-500">string</td>
+                  <td class="py-3 px-4 text-zinc-600">-</td>
+                  <td class="py-3 px-4">
+                    آدرس مخزن گیت. اگر پوشه هنوز .git نداشته باشد، در اولین
+                    بروزرسانی مخزن در همان پوشه ساخته می‌شود و فایل‌های موجود
+                    حفظ می‌شوند.
+                  </td>
+                </tr>
+                <tr>
+                  <td class="py-3 px-4 font-mono text-emerald-400 font-bold">
+                    gitBranch
+                  </td>
+                  <td class="py-3 px-4 text-zinc-500">string</td>
+                  <td class="py-3 px-4 text-zinc-600">شاخه فعلی</td>
+                  <td class="py-3 px-4">
+                    شاخه‌ای که سرویس از آن منتشر می‌شود. شاخه وارد شده در پنل
+                    بر این مقدار اولویت دارد.
+                  </td>
+                </tr>
               </tbody>
             </table>
           </div>

@@ -123,8 +123,9 @@ interface BannedIP {
 }
 
 export default function App() {
+  // The session itself is an HttpOnly cookie; this flag only avoids flashing the dashboard before login
   const [needsLogin, setNeedsLogin] = useState<boolean>(() => {
-    return !localStorage.getItem("orchestrator_token");
+    return localStorage.getItem("bas_signed_in") !== "1";
   });
   const [loginUsername, setLoginUsername] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
@@ -217,10 +218,11 @@ export default function App() {
   const [gitSelectedGroup, setGitSelectedGroup] = useState<string>("");
   const [gitKeyword, setGitKeyword] = useState("");
   const [gitUsername, setGitUsername] = useState<string>(() => localStorage.getItem("git_username") || "");
-  const [gitPassword, setGitPassword] = useState<string>(() => localStorage.getItem("git_password") || "");
+  // The password/token is kept in memory only, never in browser storage
+  const [gitPassword, setGitPassword] = useState<string>("");
   const [gitBranch, setGitBranch] = useState<string>("");
   const [gitUrl, setGitUrl] = useState<string>("");
-  const [gitRememberCreds, setGitRememberCreds] = useState<boolean>(true);
+  const [gitRememberUsername, setGitRememberUsername] = useState<boolean>(true);
   const [showGitPassword, setShowGitPassword] = useState<boolean>(false);
   const [gitAuthRequired, setGitAuthRequired] = useState<boolean>(false);
   const [gitForceClean, setGitForceClean] = useState<boolean>(true);
@@ -247,6 +249,12 @@ export default function App() {
   useEffect(() => {
     settingsRef.current = settings;
   }, [settings]);
+
+  // Remove credentials saved by earlier versions of the panel
+  useEffect(() => {
+    localStorage.removeItem("git_password");
+    localStorage.removeItem("orchestrator_token");
+  }, []);
 
   // Play alarm sound
   const playAlarm = () => {
@@ -295,13 +303,9 @@ export default function App() {
   };
 
   const apiFetch = async (url: string, options: RequestInit = {}) => {
-    const token = localStorage.getItem("orchestrator_token");
-    const headers = { ...options.headers } as any;
-    if (token) {
-      headers["Authorization"] = `Bearer ${token}`;
-    }
-    const res = await fetch(url, { ...options, headers });
+    const res = await fetch(url, { ...options, credentials: "same-origin" });
     if ((res.status === 401 || res.status === 403) && url !== "/api/auth/login") {
+      localStorage.removeItem("bas_signed_in");
       setNeedsLogin(true);
     }
     return res;
@@ -627,14 +631,10 @@ export default function App() {
 
   // Run git batch update with authentication & parameters
   const runGitUpdate = async () => {
-    if (gitRememberCreds) {
-      if (gitUsername) localStorage.setItem("git_username", gitUsername);
-      else localStorage.removeItem("git_username");
-      if (gitPassword) localStorage.setItem("git_password", gitPassword);
-      else localStorage.removeItem("git_password");
+    if (gitRememberUsername && gitUsername) {
+      localStorage.setItem("git_username", gitUsername);
     } else {
       localStorage.removeItem("git_username");
-      localStorage.removeItem("git_password");
     }
 
     setGitRunning(true);
@@ -658,6 +658,8 @@ export default function App() {
           targetType: gitTargetType,
           targetValue: targetVal,
           keyword: gitKeyword,
+          // Update exactly the services shown in the "affected services" preview
+          appIds: targetedGitApps.map((a) => a.id),
           username: gitUsername.trim(),
           password: gitPassword.trim(),
           branch: gitBranch.trim(),
@@ -772,10 +774,7 @@ export default function App() {
         body: JSON.stringify({ username: loginUsername, password: loginPassword })
       });
       if (res.ok) {
-        const data = await res.json();
-        if (data.token) {
-          localStorage.setItem("orchestrator_token", data.token);
-        }
+        localStorage.setItem("bas_signed_in", "1");
         setNeedsLogin(false);
         fetchState();
       } else {
@@ -794,7 +793,7 @@ export default function App() {
     } catch (e) {
       console.error(e);
     }
-    localStorage.removeItem("orchestrator_token");
+    localStorage.removeItem("bas_signed_in");
     setNeedsLogin(true);
     setLoginUsername("");
     setLoginPassword("");
@@ -1938,11 +1937,11 @@ export default function App() {
                           <label className="flex items-center gap-2 cursor-pointer select-none text-[11px] text-[#c0caf5]/80 hover:text-[#c0caf5]">
                             <input
                               type="checkbox"
-                              checked={gitRememberCreds}
-                              onChange={(e) => setGitRememberCreds(e.target.checked)}
+                              checked={gitRememberUsername}
+                              onChange={(e) => setGitRememberUsername(e.target.checked)}
                               className="rounded border-[#82aaff]/30 bg-[#0a101d] text-[#82aaff] focus:ring-0"
                             />
-                            ذخیره اطلاعات در مرورگر
+                            ذخیره نام کاربری در مرورگر
                           </label>
                         </div>
                       </div>
