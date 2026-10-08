@@ -573,6 +573,15 @@
   "port": 9005,
   "autoStart": true,
   "groups": ["payment", "core"]
+}
+
+// Go / Python / any language:
+{
+  "name": "chaty",
+  "type": "backend",
+  "port": 5177,
+  "build": "go build -o app .",
+  "start": "./app"
 }</pre>
         </section>
 
@@ -678,6 +687,46 @@
                   <td class="py-3 px-4">
                     آرایه‌ای از رشته‌ها برای گروه‌بندی اپ‌ها جهت انجام
                     عملیات‌های گروهی.
+                  </td>
+                </tr>
+                <tr>
+                  <td class="py-3 px-4 font-mono text-emerald-400 font-bold">
+                    start
+                  </td>
+                  <td class="py-3 px-4 text-zinc-500">string</td>
+                  <td class="py-3 px-4 text-zinc-600">—</td>
+                  <td class="py-3 px-4">
+                    دستور اجرای اپ برای هر زبانی (مثلاً <code class="font-mono bg-black px-1.5 rounded">./app</code> یا <code class="font-mono bg-black px-1.5 rounded">python3 app.py</code>). اگر باشد، به جای <code class="font-mono bg-black px-1.5 rounded">node entry</code> اجرا می‌شود.
+                  </td>
+                </tr>
+                <tr>
+                  <td class="py-3 px-4 font-mono text-emerald-400 font-bold">
+                    build
+                  </td>
+                  <td class="py-3 px-4 text-zinc-500">string</td>
+                  <td class="py-3 px-4 text-zinc-600">—</td>
+                  <td class="py-3 px-4">
+                    دستور بیلد (مثلاً <code class="font-mono bg-black px-1.5 rounded">go build -o app .</code>). قبل از Start، ری‌استارت و آپدیت گیت اجرا می‌شود، ولی در ری‌استارتِ بعد از کرش نه.
+                  </td>
+                </tr>
+                <tr>
+                  <td class="py-3 px-4 font-mono text-emerald-400 font-bold">
+                    env
+                  </td>
+                  <td class="py-3 px-4 text-zinc-500">object</td>
+                  <td class="py-3 px-4 text-zinc-600">{}</td>
+                  <td class="py-3 px-4">
+                    متغیرهای محیطی اضافه برای بیلد و اجرای اپ. متغیرهای <code class="font-mono bg-black px-1.5 rounded">.env</code> خود BAS به اپ‌ها داده نمی‌شوند.
+                  </td>
+                </tr>
+                <tr>
+                  <td class="py-3 px-4 font-mono text-emerald-400 font-bold">
+                    stopTimeout
+                  </td>
+                  <td class="py-3 px-4 text-zinc-500">number</td>
+                  <td class="py-3 px-4 text-zinc-600">10</td>
+                  <td class="py-3 px-4">
+                    چند ثانیه بعد از SIGTERM صبر شود تا اپ داده‌هایش را ذخیره کند و خودش بسته شود. بعد از آن SIGKILL فرستاده می‌شود.
                   </td>
                 </tr>
               </tbody>

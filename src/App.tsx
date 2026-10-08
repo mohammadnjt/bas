@@ -964,7 +964,9 @@ export default function App() {
   "entry": "server.js", // build/dist for front
   "port": 5001, // optional auto-assigned port
   "autoStart": true,
-  "groups": ["payment", "core"]
+  "groups": ["payment", "core"],
+  "build": "go build -o app .", // optional, any language
+  "start": "./app" // optional, instead of node <entry>
 }`}
                       </pre>
                     </div>
