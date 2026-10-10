@@ -11,8 +11,9 @@ import dotenv from "dotenv";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 
-// Load environment variables from .env file
-dotenv.config();
+// Load environment variables from .env file. These are BAS's own settings
+// (panel password, API keys…) and are kept out of the apps' environment.
+const basPrivateEnv = Object.keys(dotenv.config().parsed || {});
 
 // Fix DNS resolution priority for localhost in older Node environments
 dns.setDefaultResultOrder("ipv4first");
@@ -103,6 +104,11 @@ interface AppConfig {
   alertThreshold?: number;
   gitUrl?: string;
   gitBranch?: string;
+  // Any-language backends (Go, Python, binaries…), all optional:
+  start?: string; // shell command that runs the app instead of `node <entry>`
+  build?: string; // shell command run before starting (start / restart / git update)
+  env?: Record<string, string>; // extra environment variables for build and start
+  stopTimeout?: number; // seconds between SIGTERM and SIGKILL when stopping (default 10)
 }
 
 interface SMSGatewayConfig {
@@ -138,6 +144,8 @@ interface AppRuntimeState {
   logs: string[];
   lastCrashTime: string | null;
   childProcess: ChildProcess | null;
+  buildProcess?: ChildProcess | null;
+  stopping?: Promise<void> | null; // set while a stop is waiting for the process to exit
   staticServer: any | null; // express/http server instance for frontends
   servingRoot?: string | null; // set during an update's build: serve this copy of the previous build instead
 }
@@ -379,13 +387,110 @@ async function triggerSMSAlert(appId: string, appName: string) {
   }
 }
 
-// Start Application Process
-function startApp(id: string) {
+const isWindows = process.platform === "win32";
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// Environment for an app's build and start commands. PORT always comes from BAS.
+function appEnv(state: AppRuntimeState): NodeJS.ProcessEnv {
+  const env = childEnv();
+  for (const key of basPrivateEnv) delete env[key]; // e.g. BAS's ADMIN_PASSWORD must not leak into apps
+  return {
+    ...env,
+    NODE_PATH: path.resolve(process.cwd(), "node_modules"),
+    ...(state.config.env || {}),
+    PORT: state.config.port.toString()
+  };
+}
+
+// Apps run in their own process group, so stopping one also stops whatever it
+// spawned (e.g. `sh -c "cd server && ./app"` → the shell and the app).
+function signalGroup(child: ChildProcess, signal: NodeJS.Signals) {
+  if (!child.pid) return;
+  try {
+    if (isWindows) child.kill(signal);
+    else process.kill(-child.pid, signal);
+  } catch (e) {
+    try {
+      child.kill(signal);
+    } catch (e2) {}
+  }
+}
+
+function groupAlive(child: ChildProcess): boolean {
+  if (!child.pid) return false;
+  if (isWindows) return child.exitCode === null && child.signalCode === null;
+  try {
+    process.kill(-child.pid, 0);
+    return true;
+  } catch (e: any) {
+    return e.code === "EPERM";
+  }
+}
+
+async function waitGroupGone(child: ChildProcess, ms: number): Promise<boolean> {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (!groupAlive(child)) return true;
+    await sleep(200);
+  }
+  return !groupAlive(child);
+}
+
+function pipeLogs(id: string, child: ChildProcess) {
+  child.stdout?.on("data", (data) => {
+    const text = data.toString().trim();
+    if (text) addLog(id, text, "stdout");
+  });
+  child.stderr?.on("data", (data) => {
+    const text = data.toString().trim();
+    if (text) addLog(id, text, "stderr");
+  });
+}
+
+// Runs the app's `build` command. Resolves true on success.
+function runBuild(id: string, state: AppRuntimeState, appPath: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    addLog(id, `[SYSTEM] Building: ${state.config.build}`, "system");
+    state.status = "BUILDING";
+    let child: ChildProcess;
+    try {
+      child = spawn(state.config.build!, {
+        cwd: appPath,
+        env: appEnv(state),
+        shell: true,
+        detached: !isWindows,
+        stdio: ["ignore", "pipe", "pipe"]
+      });
+    } catch (err: any) {
+      addLog(id, `[SYSTEM_ERROR] Could not run build: ${err.message}`, "stderr");
+      resolve(false);
+      return;
+    }
+    state.buildProcess = child;
+    pipeLogs(id, child);
+    const timer = setTimeout(() => {
+      addLog(id, `[SYSTEM_ERROR] Build took longer than 15 minutes; stopping it.`, "stderr");
+      signalGroup(child, "SIGKILL");
+    }, 15 * 60 * 1000);
+    child.on("error", (err) => addLog(id, `[SYSTEM_ERROR] Build failed to start: ${err.message}`, "stderr"));
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (state.buildProcess === child) state.buildProcess = null;
+      addLog(id, code === 0 ? `[SYSTEM] Build finished.` : `[SYSTEM_ERROR] Build failed (exit code ${code}).`, code === 0 ? "system" : "stderr");
+      resolve(code === 0);
+    });
+  });
+}
+
+// Start Application Process. Runs the `build` command first unless opts.build is false
+// (crash recovery restarts skip it so they stay fast).
+async function startApp(id: string, opts: { build?: boolean } = {}) {
   const state = appStates.get(id);
   if (!state) return;
+  if (state.stopping) await state.stopping; // never start while the old process still holds the port
 
-  if (state.status === "RUNNING") {
-    addLog(id, `[SYSTEM] App is already running.`, "system");
+  if (state.status === "RUNNING" || state.status === "STARTING" || state.status === "BUILDING") {
+    addLog(id, `[SYSTEM] App is already ${state.status === "RUNNING" ? "running" : "starting"}.`, "system");
     return;
   }
 
@@ -397,44 +502,50 @@ function startApp(id: string) {
 
   if (state.config.type === "backend") {
     // BACKEND APP
-    const absoluteNodeModules = path.resolve(process.cwd(), "node_modules");
-    
+    if (state.config.build && opts.build !== false) {
+      const ok = await runBuild(id, state, appPath);
+      if ((state.status as AppRuntimeState["status"]) === "STOPPED") return; // stopped while building
+      if (!ok) addLog(id, `[SYSTEM] Starting with the previous build.`, "system");
+      state.status = "STARTING";
+    }
+
+    const command = state.config.start?.trim();
+
     // Check if entry file exists
-    if (!fs.existsSync(entryFile)) {
+    if (!command && !fs.existsSync(entryFile)) {
       state.status = "CRASHED";
       addLog(id, `[SYSTEM_ERROR] Entry file not found: ${entryFile}`, "stderr");
       return;
     }
 
     try {
-      const child = spawn("node", [state.config.entry], {
-        cwd: appPath,
-        env: childEnv({
-          NODE_PATH: absoluteNodeModules,
-          PORT: state.config.port.toString()
-        })
-      });
+      const child = command
+        ? spawn(command, { cwd: appPath, env: appEnv(state), shell: true, detached: !isWindows })
+        : spawn("node", [state.config.entry], { cwd: appPath, env: appEnv(state), detached: !isWindows });
 
       state.childProcess = child;
       state.pid = child.pid || null;
       state.status = "RUNNING";
       state.uptime = 0;
 
-      addLog(id, `[SYSTEM] Process spawned successfully (PID: ${child.pid}) with NODE_PATH integration.`, "system");
+      addLog(
+        id,
+        command
+          ? `[SYSTEM] Process spawned successfully (PID: ${child.pid}): ${command}`
+          : `[SYSTEM] Process spawned successfully (PID: ${child.pid}) with NODE_PATH integration.`,
+        "system"
+      );
 
-      child.stdout?.on("data", (data) => {
-        const text = data.toString().trim();
-        if (text) addLog(id, text, "stdout");
-      });
-
-      child.stderr?.on("data", (data) => {
-        const text = data.toString().trim();
-        if (text) addLog(id, text, "stderr");
-      });
+      pipeLogs(id, child);
 
       child.on("close", (code, signal) => {
         addLog(id, `[SYSTEM] Process exited with code ${code} (signal: ${signal || "none"})`, "system");
-        
+
+        // A process we already stopped or replaced (restart) must not touch the new one's state.
+        if (state.childProcess !== child) {
+          return;
+        }
+
         state.childProcess = null;
         state.pid = null;
         state.cpu = 0;
@@ -471,7 +582,7 @@ function startApp(id: string) {
             addLog(id, `[SYSTEM] Scheduling auto-restart #${state.restarts} in ${delay}ms...`, "system");
             setTimeout(() => {
               if (state.status === "CRASHED") {
-                startApp(id);
+                startApp(id, { build: false });
               }
             }, delay);
           } else if (state.restarts >= config.settings.maxRestarts) {
@@ -526,24 +637,47 @@ function startApp(id: string) {
   }
 }
 
-// Stop Application Process
-function stopApp(id: string) {
+// Stop Application Process: SIGTERM so the app can save its data and close
+// cleanly, then SIGKILL if it hasn't exited after `stopTimeout` seconds.
+// Resolves once the app and everything it started are gone (port released).
+function stopApp(id: string, reason = "Manual STOP requested by administrator."): Promise<void> {
   const state = appStates.get(id);
-  if (!state) return;
+  if (!state) return Promise.resolve();
+  const done = stopAppNow(id, state, reason).finally(() => {
+    if (state.stopping === done) state.stopping = null;
+  });
+  state.stopping = done;
+  return done;
+}
 
-  addLog(id, `[SYSTEM] Manual STOP requested by administrator.`, "system");
+async function stopAppNow(id: string, state: AppRuntimeState, reason: string) {
+
+  addLog(id, `[SYSTEM] ${reason}`, "system");
   state.status = "STOPPED";
   state.restarts = 0; // Reset restart counter on manual stop
 
+  if (state.buildProcess) {
+    signalGroup(state.buildProcess, "SIGKILL");
+    state.buildProcess = null;
+  }
+
   if (state.config.type === "backend") {
-    if (state.childProcess) {
-      addLog(id, `[SYSTEM] Terminating child process PID ${state.pid}...`, "system");
-      state.childProcess.kill("SIGKILL"); // Force kill to immediately release the port
-      state.childProcess = null;
-    }
+    const child = state.childProcess;
+    state.childProcess = null;
     state.pid = null;
     state.cpu = 0;
     state.memory = 0;
+    if (!child || !groupAlive(child)) return;
+
+    const timeout = Math.max(1, state.config.stopTimeout ?? 10);
+    addLog(id, `[SYSTEM] Sending SIGTERM to PID ${child.pid} (force kill after ${timeout}s)...`, "system");
+    signalGroup(child, "SIGTERM");
+    if (!(await waitGroupGone(child, timeout * 1000))) {
+      addLog(id, `[SYSTEM] Process did not exit in ${timeout}s; sending SIGKILL.`, "system");
+      signalGroup(child, "SIGKILL");
+      await waitGroupGone(child, 3000);
+    }
+    addLog(id, `[SYSTEM] Process stopped.`, "system");
   } else {
     if (state.staticServer) {
       addLog(id, `[SYSTEM] Stopping frontend web server on port ${state.config.port}...`, "system");
@@ -556,13 +690,11 @@ function stopApp(id: string) {
   }
 }
 
-// Restart Application Process
-function restartApp(id: string) {
+// Restart Application Process (waits for the old process to exit first)
+async function restartApp(id: string) {
   addLog(id, `[SYSTEM] Manual RESTART requested.`, "system");
-  stopApp(id);
-  setTimeout(() => {
-    startApp(id);
-  }, 1500);
+  await stopApp(id, "Stopping for restart...");
+  await startApp(id);
 }
 
 // Simulate Process Crash (For testing recovery, SRE, logs and notifications)
@@ -579,9 +711,7 @@ function simulateAppCrash(id: string): boolean {
 
   // Terminate backend child process or static server
   if (state.childProcess) {
-    try {
-      state.childProcess.kill("SIGKILL");
-    } catch (e) {}
+    signalGroup(state.childProcess, "SIGKILL");
     state.childProcess = null;
   }
   if (state.staticServer) {
@@ -610,7 +740,7 @@ function simulateAppCrash(id: string): boolean {
     addLog(id, `[SYSTEM] Crash Recovery Activated: Auto-recovery restart #${state.restarts} scheduled in ${delay}ms...`, "system");
     setTimeout(() => {
       if (state.status === "CRASHED") {
-        startApp(id);
+        startApp(id, { build: false });
       }
     }, delay);
   } else if (state.restarts >= config.settings.maxRestarts) {
@@ -771,6 +901,13 @@ function scanAppsDirectory(force = false) {
     const autoStart = basConfig.autoStart !== undefined ? basConfig.autoStart : true;
     const gitUrl: string | undefined = basConfig.gitUrl || undefined;
     const gitBranch: string | undefined = basConfig.gitBranch || undefined;
+    const start = typeof basConfig.start === "string" && basConfig.start.trim() ? basConfig.start.trim() : undefined;
+    const build = typeof basConfig.build === "string" && basConfig.build.trim() ? basConfig.build.trim() : undefined;
+    const env =
+      basConfig.env && typeof basConfig.env === "object"
+        ? Object.fromEntries(Object.entries(basConfig.env).map(([k, v]) => [k, String(v)]))
+        : undefined;
+    const stopTimeout = Number(basConfig.stopTimeout) > 0 ? Number(basConfig.stopTimeout) : undefined;
 
     // Check if app is already registered in config
     let existingApp = config.apps.find((app) => app.path === relativePath);
@@ -798,7 +935,11 @@ function scanAppsDirectory(force = false) {
         autoStart,
         groups,
         gitUrl,
-        gitBranch
+        gitBranch,
+        start,
+        build,
+        env,
+        stopTimeout
       };
 
       config.apps.push(newApp);
@@ -861,6 +1002,14 @@ function scanAppsDirectory(force = false) {
       if (existingApp.gitUrl !== gitUrl || existingApp.gitBranch !== gitBranch) {
         existingApp.gitUrl = gitUrl;
         existingApp.gitBranch = gitBranch;
+        changed = true;
+      }
+      const runSpec = (a: Partial<AppConfig>) => JSON.stringify([a.start, a.build, a.env, a.stopTimeout]);
+      if (runSpec(existingApp) !== runSpec({ start, build, env, stopTimeout })) {
+        existingApp.start = start;
+        existingApp.build = build;
+        existingApp.env = env;
+        existingApp.stopTimeout = stopTimeout;
         changed = true;
       }
 
@@ -986,36 +1135,12 @@ function initOrchestrator() {
 
   // Start periodic monitor and metric updater
   setInterval(() => {
-    appStates.forEach((state, id) => {
+    const running: AppRuntimeState[] = [];
+    appStates.forEach((state) => {
       if (state.status === "RUNNING") {
         state.uptime += 1;
-
         if (state.config.type === "backend" && state.pid) {
-          // Fetch actual CPU & Memory of the child process in Linux
-          const pid = state.pid;
-          exec(`ps -p ${pid} -o %cpu,rss`, (err, stdout, stderr) => {
-            if (!err && stdout) {
-              const lines = stdout.trim().split("\n");
-              if (lines.length >= 2) {
-                const stats = lines[1].trim().split(/\s+/);
-                if (stats.length >= 2) {
-                  const cpuVal = parseFloat(stats[0]);
-                  const rssKb = parseInt(stats[1], 10);
-                  if (!isNaN(cpuVal)) {
-                    state.cpu = cpuVal;
-                  }
-                  if (!isNaN(rssKb)) {
-                    state.memory = parseFloat((rssKb / 1024).toFixed(1)); // Convert KB to MB
-                  }
-                  return; // Successfully set real metrics!
-                }
-              }
-            }
-
-            // Graceful fallback to realistic simulation if ps is unavailable or fails
-            state.cpu = parseFloat((0.5 + Math.random() * 2.0).toFixed(1));
-            state.memory = parseFloat((25 + Math.random() * 5).toFixed(1));
-          });
+          running.push(state);
         } else {
           // Frontend static server (in-process) metrics simulation
           state.cpu = parseFloat((0.1 + Math.random() * 0.3).toFixed(1));
@@ -1027,9 +1152,50 @@ function initOrchestrator() {
       }
     });
 
+    // Real CPU & memory per app, summed over its whole process group
+    // (an app may be a shell plus the program it started).
+    if (running.length > 0) {
+      exec("ps -A -o pgid=,pcpu=,rss=", (err, stdout) => {
+        const totals = new Map<number, { cpu: number; rss: number }>();
+        if (!err && stdout) {
+          for (const line of stdout.trim().split("\n")) {
+            const [pgid, cpu, rss] = line.trim().split(/\s+/).map(Number);
+            if (isNaN(pgid)) continue;
+            const t = totals.get(pgid) || { cpu: 0, rss: 0 };
+            t.cpu += isNaN(cpu) ? 0 : cpu;
+            t.rss += isNaN(rss) ? 0 : rss;
+            totals.set(pgid, t);
+          }
+        }
+        for (const state of running) {
+          const t = state.pid ? totals.get(state.pid) : undefined;
+          if (t) {
+            state.cpu = parseFloat(t.cpu.toFixed(1));
+            state.memory = parseFloat((t.rss / 1024).toFixed(1)); // KB -> MB
+          } else {
+            // Graceful fallback to realistic simulation if ps is unavailable or fails
+            state.cpu = parseFloat((0.5 + Math.random() * 2.0).toFixed(1));
+            state.memory = parseFloat((25 + Math.random() * 5).toFixed(1));
+          }
+        }
+      });
+    }
+
     // Update system CPU ticks
     sampleCpuTicks();
   }, 1000);
+
+  // Apps run in their own process groups, so stop them ourselves when BAS exits.
+  let shuttingDown = false;
+  const shutdown = async (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`[Orchestrator] ${signal} received, stopping all apps...`);
+    await Promise.all(Array.from(appStates.keys()).map((id) => stopApp(id, `BAS is shutting down (${signal}).`)));
+    process.exit(0);
+  };
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
 }
 
 // Helper to resolve the main server port dynamically from environment variables, .env, or .env.example
@@ -1379,6 +1545,8 @@ async function startServer() {
       path: state.config.path,
       type: state.config.type,
       entry: state.config.entry,
+      start: state.config.start,
+      build: state.config.build,
       port: state.config.port,
       autoStart: state.config.autoStart,
       groups: state.config.groups,
@@ -2080,7 +2248,7 @@ async function startServer() {
             }
           }
 
-          // 6. Restart App
+          // 6. Restart App (backends with a `build` command are rebuilt as part of the restart)
           const servesSamePort = appState.config.type === "frontend" && appState.status === "RUNNING" &&
             appState.staticServer?.address()?.port === appState.config.port;
           if (readyToRestart && servesSamePort) {
@@ -2088,8 +2256,16 @@ async function startServer() {
             pushGitLog(`✅ نسخه جدید ${appState.config.name} بدون نیاز به ری‌استارت در حال سرو شدن است.`, "success");
           } else if (readyToRestart) {
             pushGitLog(`در حال راه‌اندازی مجدد و اعمال نسخه جدید سرویس ${appState.config.name}...`, "info");
-            restartApp(appState.config.id);
-            pushGitLog(`✅ سرویس ${appState.config.name} با موفقیت ری‌استارت شد.`, "success");
+            if (appState.config.type === "backend" && appState.config.build) {
+              pushGitLog(`در حال بیلد (${appState.config.build})؛ خروجی بیلد در لاگ‌های همین سرویس است...`, "info");
+            }
+            await restartApp(appState.config.id);
+            if (appState.status === "RUNNING") {
+              pushGitLog(`✅ سرویس ${appState.config.name} با موفقیت ری‌استارت شد.`, "success");
+            } else {
+              failedApps.push(appState.config.name);
+              pushGitLog(`❌ سرویس ${appState.config.name} بعد از ری‌استارت اجرا نشد؛ لاگ‌های سرویس را بررسی کنید.`, "error");
+            }
           } else {
             failedApps.push(appState.config.name);
             pushGitLog(`⏭️ سرویس ${appState.config.name} ری‌استارت نشد و با نسخه قبلی به کار ادامه می‌دهد. پس از رفع خطا دوباره بروزرسانی کنید.`, "error");
